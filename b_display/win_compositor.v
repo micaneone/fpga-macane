@@ -114,13 +114,15 @@ module win_compositor #(
     // ---------------- 显存域 125 MHz（接到 sdr_arb 的读口）----------------
     input  wire        clk_mem,
     input  wire        rst_mem_n,
-    output wire        mem_rd_en,
-    output wire [20:0] mem_rd_addr,
-    input  wire        mem_rd_vld,
-    input  wire [31:0] mem_rd_data,
-    // ★ 2026-10-03（不经过米白）：存储那边这一拍能不能收一个读请求
-    //   （0 = 先别发、等一等；见 line_buf 的 rd_ok 那一段）
-    input  wire        mem_rd_ok,
+    // ★★★ 2026-10-06：块级读通路（见《重构_读通路_施工说明》§5.5）
+    //   两路 line_buf 共用这一套：**谁拿到读口（gnt_a/gnt_b）就发谁的块请求**
+    output wire        blk_req,
+    output wire [20:0] blk_base,
+    output wire [20:0] blk_len,
+    input  wire        blk_gnt,
+    output wire        blk_want,
+    input  wire        blk_dv,
+    input  wire [31:0] blk_data,
 
     // ---------------- 诊断 ----------------
     output wire        o_filling       // 正在搬某一行（仲裁/状态用）
@@ -198,6 +200,9 @@ module win_compositor #(
     wire        vld_a, vld_b;
     wire        want_a, want_b;
     wire        gnt_a, gnt_b;
+    // ★ 块级：两路各自的 块请求 / 想不想要字
+    wire        breq_a, breq_b, bwant_a, bwant_b;
+    wire [20:0] bbase_a, bbase_b, blen_a, blen_b;
 
     line_buf #(.LINE_MAX(LINE_MAX), .MAX_OUT(MAX_OUT)) u_lb (
         .clk_pix(clk_pix), .rst_pix_n(rst_pix_n),
@@ -205,7 +210,7 @@ module win_compositor #(
         .line_go(line_go), .line_wbase(line_wbase), .line_words(line_words),
         .rd_index(rd_index), .pix_out(pix_out), .pix_ready(pix_ready),
         .o_filling(o_filling),
-        .o_want(want_a), .rd_gnt(gnt_a), .rd_ok(mem_rd_ok),
+        .o_want(want_a), .rd_gnt(gnt_a),
 `ifdef B_DEBUG_PROBE
         .o_dbg_wbase(o_dbg_wbase), .o_dbg_fwords(o_dbg_fwords),
         .o_dbg_rd0(o_dbg_rd0), .o_dbg_rd1(o_dbg_rd1), .o_dbg_frozen(),
@@ -214,8 +219,8 @@ module win_compositor #(
         // ★★ 2026-09-28：相位必须给 0（原来把旋钮接到这儿，等于每行丢掉头 3 个脉冲）
         .mo_sel(2'd0),
         .clk_mem(clk_mem), .rst_mem_n(rst_mem_n),
-        .mem_rd_en(en_a), .mem_rd_addr(addr_a),
-        .mem_rd_vld(vld_a), .mem_rd_data(mem_rd_data)
+        .blk_req(breq_a), .blk_base(bbase_a), .blk_len(blen_a),
+        .blk_gnt(gnt_a), .blk_want(bwant_a), .blk_dv(vld_a), .blk_data(blk_data)
 `ifdef B_DEBUG_PROBE
         , .o_off_first(o_off_first), .o_align_bad(o_align_bad)
 `endif
@@ -232,11 +237,11 @@ module win_compositor #(
         .line_go(line_go_b), .line_wbase(line_wbase_b), .line_words(line_words_b),
         .rd_index(rd_index_b), .pix_out(pix_out_b), .pix_ready(pix_ready_b),
         .o_filling(filling_b),
-        .o_want(want_b), .rd_gnt(gnt_b), .rd_ok(mem_rd_ok),
+        .o_want(want_b), .rd_gnt(gnt_b),
         .mo_sel(2'd0),
         .clk_mem(clk_mem), .rst_mem_n(rst_mem_n),
-        .mem_rd_en(en_b), .mem_rd_addr(addr_b),
-        .mem_rd_vld(vld_b), .mem_rd_data(mem_rd_data)
+        .blk_req(breq_b), .blk_base(bbase_b), .blk_len(blen_b),
+        .blk_gnt(gnt_b), .blk_want(bwant_b), .blk_dv(vld_b), .blk_data(blk_data)
     );
 
     // ============================================================
@@ -291,10 +296,14 @@ module win_compositor #(
         end
     end
 
-    assign mem_rd_en   = gnt_b ? en_b : (gnt_a ? en_a : 1'b0);
-    assign mem_rd_addr = gnt_b ? addr_b : addr_a;
-    assign vld_a       = mem_rd_vld && gnt_a;
-    assign vld_b       = mem_rd_vld && gnt_b;
+    // ★★★ 2026-10-06 块级：谁拿到读口（gnt_a/gnt_b），谁的 块请求/要字 就往上传；
+    //   回来的 blk_dv/blk_data 同样按 gnt 分回那一路（和原来的分流结构一模一样）。
+    assign blk_req  = gnt_b ? breq_b  : (gnt_a ? breq_a  : 1'b0);
+    assign blk_base = gnt_b ? bbase_b : bbase_a;
+    assign blk_len  = gnt_b ? blen_b  : blen_a;
+    assign blk_want = gnt_b ? bwant_b : bwant_a;
+    assign vld_a    = blk_dv && gnt_a;
+    assign vld_b    = blk_dv && gnt_b;
 
     // ============================================================
     //  ③ 输出寄存一拍：窗口内给源图像素、窗口外给底色
