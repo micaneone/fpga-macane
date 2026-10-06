@@ -67,7 +67,13 @@ module vendor_rd_path #(
     output wire        rd_valid,            // 官方 FIFO 的 valid（备用）
     output wire [9:0]  rd_used,             // ★ FIFO 里现在有几个字（0 = 空的）
     output wire        rd_used_nz,          // = |rd_used，给"有字就读"用
-    output wire        o_rd_busy            // 官方报"读指令期间"（以后接写侧互锁用）
+    output wire        o_rd_busy,           // 官方报"读指令期间"（以后接写侧互锁用）
+    // ★★★ 2026-10-06 诊断探针（sticky 计数，饱和在 0xFFFF）：
+    //   ① `o_rd_en_cnt` = 官方控制器一共发过多少次 `App_rd_en`
+    //      0 = 它一次读都没发（那问题在它的"FIFO 空间够不够"判断上）
+    //   ② `o_fifo_seen` = 读 FIFO 曾经非空过吗（1 = 数据确实回来过）
+    output reg  [15:0] o_rd_en_cnt,
+    output reg         o_fifo_seen
 );
 
     // ---- 内部线 ----
@@ -130,5 +136,17 @@ module vendor_rd_path #(
 
     assign rd_used    = {1'b0, fifo_used};
     assign rd_used_nz = |fifo_used;
+
+    // ---- 探针 ①② ----
+    always @(posedge clk_mem or negedge rst_mem_n) begin
+        if (!rst_mem_n) begin
+            o_rd_en_cnt <= 16'd0;
+            o_fifo_seen <= 1'b0;
+        end
+        else begin
+            if (App_rd_en && (o_rd_en_cnt != 16'hFFFF)) o_rd_en_cnt <= o_rd_en_cnt + 16'd1;
+            if (rd_used_nz)                             o_fifo_seen <= 1'b1;
+        end
+    end
 
 endmodule

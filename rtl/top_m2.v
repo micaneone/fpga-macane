@@ -900,6 +900,10 @@ module top_m2 #(
     // ============================================================
     wire        vrd_ack, vrd_fin, vrd_used_nz, vrd_busy;
     wire [31:0] vrd_dout;
+    wire [9:0]  vrd_used;                  // ★ 探针：FIFO 现在几个字
+    wire [15:0] vrd_rd_en_cnt;             // ★ 探针①：官方控制器发过多少次 App_rd_en
+    wire        vrd_fifo_seen;             // ★ 探针②：FIFO 曾经非空过吗
+    wire [15:0] blk_fin_cnt;               // ★ 探针③：仲裁器服务完几个块
     wire        blk_d_gnt;
     wire [1:0]  o_blk_dv;                  // ★ bit0 = 显示交付（来自 blk_rd_arb.o_dv）
     wire [31:0] blk_d_data;
@@ -925,9 +929,11 @@ module top_m2 #(
         .rd_re            (blk_rd_re),
         .rd_dout          (vrd_dout),
         .rd_valid         (),
-        .rd_used          (),
+        .rd_used          (vrd_used),
         .rd_used_nz       (vrd_used_nz),
-        .o_rd_busy        (vrd_busy)
+        .o_rd_busy        (vrd_busy),
+        .o_rd_en_cnt      (vrd_rd_en_cnt),
+        .o_fifo_seen      (vrd_fifo_seen)
     );
 
     blk_rd_arb u_blk (
@@ -944,7 +950,7 @@ module top_m2 #(
         // 音频口：现在音频关着（AUDIO_OFF=1），先挂空
         .a_req          (1'b0), .a_base(21'd0), .a_len(21'd0),
         .a_gnt          (), .a_next(1'b0), .a_data(), .a_done(),
-        .o_blk_cnt      (), .o_aud_blk_cnt()
+        .o_blk_cnt      (blk_fin_cnt), .o_aud_blk_cnt()
     );
 
     // ============================================================
@@ -1689,9 +1695,13 @@ module top_m2 #(
         //       31 = 这些字的 32 位累加和【低 16】
         //       32 = 这些字的 32 位累加和【高 16】
         //     ★ 拿它和电脑上按 WAV 算出的期望值比：对上了 = 读回来的音频数据逐字正确。
-        .sb_rise (aud_dbg_cnt),
-        .sb_col  (aud_dbg_sum[15:0]),
-        .rv_col  (aud_dbg_sum[31:16]),
+        // ★★★ 2026-10-06 诊断临时占用（音频现在 AUDIO_OFF=1，它的自检本来就闲着）：
+        //   字段 30 = 官方控制器发过多少次 App_rd_en（0 ⇒ 一次读都没发）
+        //   字段 31 = 仲裁器服务完几个块（read_fin 次数）
+        //   字段 32 = 读 FIFO 的当前占用 + bit15 = "FIFO 曾经非空过"
+        .sb_rise (vrd_rd_en_cnt),
+        .sb_col  (blk_fin_cnt),
+        .rv_col  ({vrd_fifo_seen, 5'd0, vrd_used}),
         .uart_tx(uart_tx)
     );
 
