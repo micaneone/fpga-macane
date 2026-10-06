@@ -78,7 +78,8 @@ module vendor_rd_path #(
 
     // ---- 内部线 ----
     wire        fifo_aclr;                  // 控制器 → FIFO 的异步清零
-    wire [8:0]  fifo_used;                  // FIFO 自己输出的是 9 位
+    wire [8:0]  fifo_used_w;                // 写侧计数（wrusedw）：喂给控制器看空间
+    wire [8:0]  fifo_used_r;                // ★ 读侧计数（rdusedw）：告诉我们"能取几个字"
 
     // ============================================================
     //  官方读控制器
@@ -110,7 +111,7 @@ module vendor_rd_path #(
         .read_addr_index  (2'd0),
         .read_len         (rd_len),
         .fifo_aclr        (fifo_aclr),
-        .wrusedw          ({1'b0, fifo_used})   // ★ 9 位 → 10 位，显式补 0
+        .wrusedw          ({1'b0, fifo_used_w}) // ★ 9 位 → 10 位，显式补 0
     );
 
     // ============================================================
@@ -130,12 +131,23 @@ module vendor_rd_path #(
         .empty_flag  (),
         .afull       (),
         .aempty      (),
-        .wrusedw     (fifo_used),
-        .rdusedw     ()
+        .wrusedw     (fifo_used_w),
+        .rdusedw     (fifo_used_r)
     );
 
-    assign rd_used    = {1'b0, fifo_used};
-    assign rd_used_nz = |fifo_used;
+    // ★★★ 2026-10-06【必须用读侧计数】：这个 FIFO 的 clkw 和 clkr 虽然都接
+    //   clk_mem，但内部指针仍然走格雷码同步器（2~3 拍）。`wrusedw` 是
+    //   "写指针 − 同步过来的读指针" —— 写侧**本地**指针，字一写进去它立刻加 1；
+    //   而读侧的 `empty_flag` / `rdusedw` 要等写指针同步过来才算数。
+    //   ⇒ 用 wrusedw 当"有字了"会让仲裁器**早 3~4 拍**就去 read_en：
+    //     那几拍 FIFO 还认为自己空着（rd_en_s = !empty & re 被挡掉），
+    //     于是 pop 丢空、dout 还是旧值 —— 交付出去的就是**错位的旧字**。
+    //     仿真里这条一眼可见：请求 base=1000/len=8，交付出来是
+    //       [0,0,0,0,1000,1001,1002,1003]
+    //     （前四个是没更新过的 dout），屏上就是"整条读通路全错"。
+    //   ⇒ 一律用读侧口径：rdusedw 和 empty_flag 是同源的，绝不会早。
+    assign rd_used    = {1'b0, fifo_used_r};
+    assign rd_used_nz = |fifo_used_r;
 
     // ---- 探针 ①② ----
     always @(posedge clk_mem or negedge rst_mem_n) begin

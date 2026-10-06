@@ -98,11 +98,17 @@ module blk_rd_arb #(
     // ★ 交付脉冲的"源"：只在主状态机里赋值一次，端口再用连续赋值分给两家
     //   （TD 对"同一个 reg 在两个分支/两个 always 里赋值"很敏感，这样写最保险）
     reg         take_dv_r;
-    // ★★★ 2026-10-06【关键修正】：官方读 FIFO 是"read_en 之后【下一拍】dout 才有效"。
-    //   所以取数要打一拍：`take_ok` 是"这一拍发 read_en"，`take_d1` 才是"数据到了"。
-    //   数据本身【组合】引出去（`d_data = rd_data`），由 `o_dv` 的脉冲告诉申请方"这一拍有效"。
-    reg         take_d1;
-    reg         owner_d1;                  // 打一拍的所有者（dv 要和对齐）
+    // ★★★ 2026-10-06【关键修正·第二版】：官方读 FIFO 是
+    //     "read_en 之后【下一拍】dout 才有效"（非 show-ahead + NOREG）。
+    //   而我们这边的 read_en 本身也是寄存器（`rd_en <= take_ok`），所以：
+    //        take_ok (T)  →  rd_en (T+1)  →  rd_data/dout 有效 (T+2)
+    //   ⇒ **交付脉冲必须打两拍**才和 dout 对齐（第一版只打一拍，
+    //     交付的是"上一次 pop 的旧 dout"，实测交付出来是
+    //     [旧值 x4, 1000, 1001, 1002, 1003]，请求是 1000..1007 ⇒ 整条读通路全错）。
+    //   数据本身【组合】引出去（`d_data = rd_data`），
+    //   由 `o_dv` 的脉冲（= take_ok 打两拍）告诉申请方"这一拍有效"。
+    reg         take_d1, take_d2;
+    reg         owner_d1, owner_d2;        // 跟着打两拍的所有者（dv 要和对齐）
 
     wire        cur_req  = owner ? a_req  : d_req;
     wire        cur_next = owner ? a_next : d_next;
@@ -207,15 +213,19 @@ module blk_rd_arb #(
     //      因为"一次只有一个块在服务"，所以**谁在服务，数据就归谁** ——
     //      这里不需要任何 tag 队列，这是本设计的关键好处。
     // ============================================================
-    // 打一拍的"取数完成"：rd_en 发出去之后，下一拍 rd_data 才有效
+    // 打两拍的"取数完成"：rd_en 是寄存器，dout 又是 rd_en 的下一拍 ⇒ 共两拍
     always @(posedge clk_mem or negedge rst_mem_n) begin
         if (!rst_mem_n) begin
             take_d1  <= 1'b0;
+            take_d2  <= 1'b0;
             owner_d1 <= 1'b0;
+            owner_d2 <= 1'b0;
         end
         else begin
-            take_d1  <= take_ok;             // ★ 数据在下一拍有效
+            take_d1  <= take_ok;             // 第 1 拍：rd_en 发出
+            take_d2  <= take_d1;             // 第 2 拍：rd_data 到位
             owner_d1 <= owner;
+            owner_d2 <= owner_d1;
         end
     end
 
@@ -225,7 +235,7 @@ module blk_rd_arb #(
     assign a_data = rd_data;
 
     // ★★★ 交付脉冲：一根 2 位线，bit0 = 显示、bit1 = 音频。
-    //   用【打一拍】的 take_d1（数据有效那一拍），和组合引出的数据天然对齐。
-    assign o_dv = take_d1 ? (owner_d1 ? 2'b10 : 2'b01) : 2'b00;
+    //   用【打两拍】的 take_d2（= dout 真的有效那一拍），和组合引出的数据天然对齐。
+    assign o_dv = take_d2 ? (owner_d2 ? 2'b10 : 2'b01) : 2'b00;
 
 endmodule
