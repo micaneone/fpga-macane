@@ -61,7 +61,7 @@ module blk_rd_arb #(
     output reg         d_gnt,
     input  wire        d_next,             // 电平：显示"还要字"
     output reg  [31:0] d_data,
-    output reg         d_dv,               // ★ 单拍：d_data 有效（一个字交付）
+    output wire        d_dv,               // ★ 单拍：d_data 有效（一个字交付）
     output reg         d_done,             // 单拍：这个块取完了
 
     // ============================================================
@@ -73,7 +73,7 @@ module blk_rd_arb #(
     output reg         a_gnt,
     input  wire        a_next,
     output reg  [31:0] a_data,
-    output reg         a_dv,               // ★ 单拍：a_data 有效
+    output wire        a_dv,               // ★ 单拍：a_data 有效
     output reg         a_done,             // 单拍
 
     // ---- 诊断 ----
@@ -93,6 +93,9 @@ module blk_rd_arb #(
     reg         owner;                     // 0 = 显示，1 = 音频
     reg  [20:0] blk_base, blk_len;
     reg  [20:0] take_cnt;                  // 这个块已经被取走多少个字
+    // ★ 交付脉冲的"源"：只在主状态机里赋值一次，端口再用连续赋值分给两家
+    //   （TD 对"同一个 reg 在两个分支/两个 always 里赋值"很敏感，这样写最保险）
+    reg         take_dv_r;
 
     wire        cur_req  = owner ? a_req  : d_req;
     wire        cur_next = owner ? a_next : d_next;
@@ -118,16 +121,14 @@ module blk_rd_arb #(
             a_gnt     <= 1'b0;
             d_done    <= 1'b0;
             a_done    <= 1'b0;
-            d_dv      <= 1'b0;
-            a_dv      <= 1'b0;
+            take_dv_r <= 1'b0;
             o_blk_cnt     <= 16'd0;
             o_aud_blk_cnt <= 16'd0;
         end
         else begin
             d_done <= 1'b0;
             a_done <= 1'b0;
-            d_dv   <= 1'b0;
-            a_dv   <= 1'b0;
+            take_dv_r <= take_ok;          // ★ 唯一赋值处
 
             case (st)
             // ---- 等申请：显示优先 ----
@@ -209,10 +210,11 @@ module blk_rd_arb #(
                 if (owner) a_data <= rd_data;
                 else       d_data <= rd_data;
             end
-            // ★ 交付脉冲：和 d_data/a_data 同一拍更新 ⇒ 数据与"有效"天然对齐
-            d_dv <= (take_ok && !owner);
-            a_dv <= (take_ok &&  owner);
         end
     end
+
+    // ★★★ 交付脉冲：连续赋值分给两家（`take_dv_r` 只在上面的 always 里赋值一次）
+    assign d_dv = take_dv_r & ~owner;
+    assign a_dv = take_dv_r &  owner;
 
 endmodule

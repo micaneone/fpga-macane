@@ -580,27 +580,10 @@
             </File>
             <File Path="../rtl/vendor_read_test.v">
                 <FileInfo>
-                    <Attr Name="AutoExcluded" Val="true"/>
                     <Attr Name="UsedInSyn" Val="true"/>
                     <Attr Name="UsedInP&R" Val="true"/>
                     <Attr Name="BelongTo" Val="design_1"/>
-                    <Attr Name="CompileOrder" Val="77"/>
-                </FileInfo>
-            </File>
-            <File Path="../rtl/vendor_rd_path.v">
-                <FileInfo>
-                    <Attr Name="UsedInSyn" Val="true"/>
-                    <Attr Name="UsedInP&R" Val="true"/>
-                    <Attr Name="BelongTo" Val="design_1"/>
-                    <Attr Name="CompileOrder" Val="78"/>
-                </FileInfo>
-            </File>
-            <File Path="../rtl/blk_rd_arb.v">
-                <FileInfo>
-                    <Attr Name="UsedInSyn" Val="true"/>
-                    <Attr Name="UsedInP&R" Val="true"/>
-                    <Attr Name="BelongTo" Val="design_1"/>
-                    <Attr Name="CompileOrder" Val="79"/>
+                    <Attr Name="CompileOrder" Val="72"/>
                 </FileInfo>
             </File>
             <File Path="../a_image/audio_arc_calculate.v">
@@ -650,6 +633,31 @@
                     <Attr Name="UsedInP&R" Val="true"/>
                     <Attr Name="BelongTo" Val="design_1"/>
                     <Attr Name="CompileOrder" Val="78"/>
+                </FileInfo>
+            </File>
+            <File Path="M2_Runs/syn_1/vendor_rd_path.v">
+                <FileInfo>
+                    <Attr Name="AutoExcluded" Val="true"/>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="79"/>
+                </FileInfo>
+            </File>
+            <File Path="../rtl/blk_rd_arb.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="80"/>
+                </FileInfo>
+            </File>
+            <File Path="../rtl/vendor_rd_path.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="81"/>
                 </FileInfo>
             </File>
         </Verilog>
