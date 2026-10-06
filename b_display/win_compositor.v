@@ -271,6 +271,13 @@ module win_compositor #(
     assign gnt_b = (rd_lock == 2'd2);
     wire idle_a = ~o_filling;              // 甲不在搬
     wire idle_b = ~filling_b;              // 乙不在搬
+    // ★★★ 2026-10-06【按 B 改·关键一处】：申请条件从 `want_a/want_b`（老的 o_want）换成
+    //   **块请求本身 `breq_a/breq_b`** —— 上板探针证明：行缓冲确实开始了搬运（字段16=324），
+    //   但 `o_want` 那条老握手在块级通路下不再拉高 ⇒ 锁永远拿不到 ⇒ 块请求被 mux 门成 0
+    //   ⇒ 仲裁器看不到请求 ⇒ 官方控制器一次读都不发（字段30 位图全 0）。
+    //   块请求就是"我要读口"，用它当申请条件最简单也最可靠。
+    wire ask_a = breq_a;
+    wire ask_b = breq_b;
 
     always @(posedge clk_mem or negedge rst_mem_n) begin
         if (!rst_mem_n) begin
@@ -281,8 +288,8 @@ module win_compositor #(
             rel_cnt <= 5'd0;
             // ★ 两人同时开搬时【让甲方先】—— 甲方是现在屏上这位，
             //   错过了这一行就会露出一行底色；乙方这一行可以晚一点补。
-            if (want_a)      rd_lock <= 2'd1;
-            else if (want_b) rd_lock <= 2'd2;
+            if (ask_a)      rd_lock <= 2'd1;
+            else if (ask_b) rd_lock <= 2'd2;
         end
         else begin
             if ((gnt_a && idle_a) || (gnt_b && idle_b)) begin
