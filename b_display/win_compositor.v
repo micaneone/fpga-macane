@@ -124,6 +124,10 @@ module win_compositor #(
     input  wire        blk_dv,
     input  wire [31:0] blk_data,
 
+    // ★★★ 2026-10-06 诊断探针（sticky，接串口位图 bit6/bit7）
+    output reg         o_dbg_want_seen,    // 行缓冲的 o_want（"请求到了、还没拿到读口"）出现过
+    output reg         o_dbg_lock_seen,    // 读口锁 rd_lock 拿到过
+
     // ---------------- 诊断 ----------------
     output wire        o_filling       // 正在搬某一行（仲裁/状态用）
 `ifdef B_DEBUG_PROBE
@@ -271,13 +275,26 @@ module win_compositor #(
     assign gnt_b = (rd_lock == 2'd2);
     wire idle_a = ~o_filling;              // 甲不在搬
     wire idle_b = ~filling_b;              // 乙不在搬
-    // ★★★ 2026-10-06【按 B 改·关键一处】：申请条件从 `want_a/want_b`（老的 o_want）换成
-    //   **块请求本身 `breq_a/breq_b`** —— 上板探针证明：行缓冲确实开始了搬运（字段16=324），
-    //   但 `o_want` 那条老握手在块级通路下不再拉高 ⇒ 锁永远拿不到 ⇒ 块请求被 mux 门成 0
-    //   ⇒ 仲裁器看不到请求 ⇒ 官方控制器一次读都不发（字段30 位图全 0）。
-    //   块请求就是"我要读口"，用它当申请条件最简单也最可靠。
-    wire ask_a = breq_a;
-    wire ask_b = breq_b;
+    // ★★★ 2026-10-06【已改回】上一刀把申请条件换成 `breq_a/breq_b` 是**错的方向**：
+    //   `line_buf` 的 `req_go = (req_edge|rd_pend) & ~filling & rd_gnt`（第 354 行）——
+    //   搬运要等 `rd_gnt` 才可能开始，而 `breq_*` 只在搬运开始之后才拉高 ⇒ **死锁**
+    //   （上板表现：连搬运都不开始了、`lb_words` 变 0）。
+    //   ⇒ 恢复用 `want_a/want_b`（`o_want`：请求已到、还没拿到读口，**在搬运之前就有效**）。
+    //   ⇒ 同时把它接到位图探针（bit6/bit7），下次上板就能看出"请求到底到没到"。
+    wire ask_a = want_a;
+    wire ask_b = want_b;
+
+    // ---- 诊断探针（sticky）：o_want 出现过吗 / 锁拿到过吗 ----
+    always @(posedge clk_mem or negedge rst_mem_n) begin
+        if (!rst_mem_n) begin
+            o_dbg_want_seen <= 1'b0;
+            o_dbg_lock_seen <= 1'b0;
+        end
+        else begin
+            if (want_a || want_b)      o_dbg_want_seen <= 1'b1;
+            if (rd_lock != 2'd0)       o_dbg_lock_seen <= 1'b1;
+        end
+    end
 
     always @(posedge clk_mem or negedge rst_mem_n) begin
         if (!rst_mem_n) begin

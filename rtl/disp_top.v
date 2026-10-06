@@ -86,6 +86,9 @@ module disp_top #(
     output wire        blk_want,
     input  wire        blk_dv,
     input  wire [31:0] blk_data,
+    // ★★★ 2026-10-06 诊断探针（透传给顶层位图 bit6/bit7）
+    output wire        o_dbg_want_seen,
+    output wire        o_dbg_lock_seen,
 
     // ---------------- HDMI 引脚 ----------------
     output wire        HDMI_CLK_P,
@@ -173,6 +176,7 @@ module disp_top #(
         .clk_mem(clk_mem), .rst_mem_n(rst_mem_n),
         .blk_req(blk_req), .blk_base(blk_base), .blk_len(blk_len),
         .blk_gnt(blk_gnt), .blk_want(blk_want), .blk_dv(blk_dv), .blk_data(blk_data),
+        .o_dbg_want_seen(o_dbg_want_seen), .o_dbg_lock_seen(o_dbg_lock_seen),
         .o_filling(),
         .o_dbg_wbase(dbg_wbase), .o_dbg_fwords(dbg_fwords),
         .o_dbg_rd0(dbg_rd0), .o_dbg_rd1(dbg_rd1),

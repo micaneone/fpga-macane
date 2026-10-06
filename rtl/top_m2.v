@@ -905,6 +905,7 @@ module top_m2 #(
     wire        vrd_fifo_seen;             // ★ 探针②：FIFO 曾经非空过吗
     wire [15:0] blk_fin_cnt;               // ★ 探针③：仲裁器服务完几个块
     wire        blk_d_gnt;
+    wire        dbg_want_seen, dbg_lock_seen;   // ★ 探针 bit6/bit7（o_want 到过 / 锁拿到过）
     wire [1:0]  o_blk_dv;                  // ★ bit0 = 显示交付（来自 blk_rd_arb.o_dv）
     wire [31:0] blk_d_data;
 
@@ -975,6 +976,8 @@ module top_m2 #(
             if (blk_rd_req)    dbg_chain[3] <= 1'b1;
             if (vrd_ack)       dbg_chain[4] <= 1'b1;
             if (sdr_rd_en)     dbg_chain[5] <= 1'b1;
+            if (dbg_want_seen) dbg_chain[6] <= 1'b1;
+            if (dbg_lock_seen) dbg_chain[7] <= 1'b1;
         end
     end
 
@@ -1347,6 +1350,7 @@ module top_m2 #(
         // ★★★ 2026-10-05：读数据不再直连 SDRAM 控制器，而是**经 top_aud 分流**
         //   （top_aud 只把"显示要的那份"给回来，音频的数据它自己收进 FIFO）
         .blk_gnt(blk_d_gnt), .blk_want(d_blk_want), .blk_dv(o_blk_dv[0]), .blk_data(blk_d_data),
+        .o_dbg_want_seen(dbg_want_seen), .o_dbg_lock_seen(dbg_lock_seen),
         // ★★ 音频 6 根 → my_hdmitop（同一个像素域）
         .I_audio_valid(hdmi_audio_valid),
         .I_audio_left (hdmi_audio_left),
