@@ -204,14 +204,19 @@ module top_m2 #(
     //    = 0：恢复音频（音乐 + 已知的沙沙声）。
     //    ★ 修音频时把它改回 0 即可，装音效/播放的逻辑一行都没删。
     // ============================================================
-    localparam AUDIO_OFF = 1'b1;
+    // ★★★★ 2026-10-06 晚【音频改走块级读口】—— 开关打回 0
+    //   上一档（=1）是过渡档："先把显示的块级读通路单独验干净，音频一条读都不发"。
+    //   现在显示那条路已经在仿真里逐像素验过（tb_m2_blk_chain 19200/19200 全对），
+    //   音频也换成【同一个仲裁器的音频口】（a_image\aud_blk_rd.v），
+    //   所以打回 0：自动装音效 + 每次换图自动播一次。
+    //   ★ 音频饿不死显示：块口是**显示优先**，而且两头都有看门狗兜底
+    //     （blk_rd_arb 的 SERV_MAX + aud_blk_rd 的 SERV_MAX）。
+    localparam AUDIO_OFF = 1'b0;
 
-    // 读口绕道（line_buf ↔ top_aud ↔ sdr_arb）
-    wire        line_rd_vld_w;        // top_aud → disp_top（显示的读数据有效）
-    wire [31:0] line_rd_data_w;       // top_aud → disp_top
-    wire        aud_sdr_rd_en;        // top_aud → sdr_arb.disp_rd_en
-    wire [20:0] aud_sdr_rd_addr;      // top_aud → sdr_arb.disp_rd_addr
-    wire        aud_line_req;         // 显示这一拍想不想读（下面按档位赋值）
+    // 读口绕道（line_buf ↔ top_aud ↔ sdr_arb）—— ★ 2026-10-06 起这几根全部作废：
+    //   line_buf 走块口、音频也走块口，谁也不再用"逐拍 disp_rd_en/addr"。
+    //   保留 `aud_line_req` 只是给串口的 flags 字段看着（它不再是任何读口的驱动）。
+    wire        aud_line_req;
 
     // 音频链的其它线
     wire        clk_aud, pll_aud_locked;
@@ -227,9 +232,17 @@ module top_m2 #(
     wire [20:0] aud_dbg_base, aud_dbg_words;
     wire [31:0] aud_dbg_dout;
     wire        aud_dbg_vld, aud_dbg_play_tgl;
-    wire        aud_tag_bad;            // ★★ 集成临时改动（第 6 条）：tag 队列脱钩过（sticky）
     wire [15:0] aud_dbg_cnt;            // ★★ 第 8 条：音频数据自检（字数）
     wire [31:0] aud_dbg_sum;            // ★★ 第 8 条：音频数据自检（32 位和）
+    // ---- ★★★ 2026-10-06 音频的块级读口（top_aud ↔ blk_rd_arb 的音频口）----
+    wire        aud_a_req;              // top_aud → 闸门
+    wire        aud_a_req_g;            // 闸门后 → blk_rd_arb.a_req
+    wire [20:0] aud_a_base, aud_a_len;
+    wire        aud_a_gnt, aud_a_next;
+    wire [31:0] blk_a_data;
+    wire        aud_blk_stall;
+    // ★ 装载期间禁读闸门（先声明，赋值在下面第 8 节前）—— 显示和音频共用
+    wire        disp_rd_gate;
 
     // 音频装载 / 播放的小状态机（C 轨还没接，这里自产命令）
     reg         aud_want;             // 1 = 这一次装载是"装音效"
@@ -690,9 +703,11 @@ module top_m2 #(
     //      sdram.Sdr_rd_dout/Sdr_rd_en → top_aud.mem_rd_dout/vld
     //   ★ 仲裁是"显示优先、音频只捡显示不用的拍"，**绝不压 disp_rd_en**
     //     （line_buf 的 fsent 是自己数的，压一拍就少收一个字 → 那行错位）。
-    //   ⇒ 原来那两根直连线从此由 top_aud 驱动：
-    assign st_rd_addr_m = aud_sdr_rd_addr;
-    assign st_rd_en_m   = aud_sdr_rd_en;
+    //   ⇒ 原来那两根直连线由 top_aud 驱动。
+    // ★★★ 2026-10-06：音频和显示都改成块级之后，**没有任何东西再用逐拍读口**了，
+    //   所以这两根打桩成 0（sdr_arb 内部的读侧本来就已经断开、App_rd_* 也没接）。
+    assign st_rd_addr_m = 21'd0;
+    assign st_rd_en_m   = 1'b0;
 
     // ============================================================
     //  ★★★ 2026-10-03（转场"不经过米白"）★★★  读口：整段禁读 → 只在写突发时等一等
@@ -904,6 +919,8 @@ module top_m2 #(
     wire [15:0] vrd_rd_en_cnt;             // ★ 探针①：官方控制器发过多少次 App_rd_en
     wire        vrd_fifo_seen;             // ★ 探针②：FIFO 曾经非空过吗
     wire [15:0] blk_fin_cnt;               // ★ 探针③：仲裁器服务完几个块
+    wire [15:0] blk_aud_cnt;               // ★ 探针：其中几块是音频
+    wire        blk_timeout;               // ★ 探针：仲裁器看门狗掐断过（sticky）
     wire        blk_d_gnt;
     wire        dbg_want_seen, dbg_lock_seen;   // ★ 探针 bit6/bit7（o_want 到过 / 锁拿到过）
     wire [1:0]  o_blk_dv;                  // ★ bit0 = 显示交付（来自 blk_rd_arb.o_dv）
@@ -948,10 +965,11 @@ module top_m2 #(
         .d_req          (d_blk_req), .d_base(d_blk_base), .d_len(d_blk_len),
         .d_gnt          (blk_d_gnt), .d_next(d_blk_want),
         .d_data         (blk_d_data), .o_dv(o_blk_dv), .d_done(),
-        // 音频口：现在音频关着（AUDIO_OFF=1），先挂空
-        .a_req          (1'b0), .a_base(21'd0), .a_len(21'd0),
-        .a_gnt          (), .a_next(1'b0), .a_data(), .a_done(),
-        .o_blk_cnt      (blk_fin_cnt), .o_aud_blk_cnt()
+        // 音频口：★ 2026-10-06 起接到 top_aud 的块级音频读客户端
+        .a_req          (aud_a_req_g), .a_base(aud_a_base), .a_len(aud_a_len),
+        .a_gnt          (aud_a_gnt), .a_next(aud_a_next), .a_data(blk_a_data), .a_done(),
+        .o_blk_cnt      (blk_fin_cnt), .o_aud_blk_cnt(blk_aud_cnt),
+        .o_timeout      (blk_timeout)
     );
 
     // ============================================================
@@ -1394,23 +1412,16 @@ module top_m2 #(
         // ---- C 轨命令（现在由顶层那个小状态机自产）----
         .play_sfx(aud_play_req), .sfx_id(4'd0), .volume(8'hFF), .busy(aud_busy_w),
 
-        // ---- 显示的读口（绕道）----
-        .line_rd_req (aud_line_req),
-        .line_rd_addr(disp_rd_addr),
-        .line_rd_data(line_rd_data_w),
-        .line_rd_vld (line_rd_vld_w),
-
-        // ---- 去 sdr_arb 的读口 ----
-        .sdr_rd_en  (aud_sdr_rd_en),
-        .sdr_rd_addr(aud_sdr_rd_addr),
-
-        // ---- SDRAM 控制器回来的读数据 ----
-        .mem_rd_dout(rd_data),
-        .mem_rd_vld (rd_vld),
-        // ★★ 集成临时改动（见 规划\A轨待改清单.md 2026-10-05 第 6 条）：
-        //    SDRAM 核的忙/刷新标志（只给音频用：忙的时候先别发音频的读）
-        .sdr_busy        (sdr_busy),
-        .sdr_init_ref_vld(sdr_init_ref_vld),
+        // ---- ★★★ 2026-10-06 块级音频读口（接 blk_rd_arb 的音频口）----
+        //   a_req 过和显示同一道"装载期间禁读"闸门（§6.3-1 红线）。
+        .a_req     (aud_a_req),
+        .a_base    (aud_a_base),
+        .a_len     (aud_a_len),
+        .a_gnt     (aud_a_gnt),
+        .a_next    (aud_a_next),
+        .a_data    (blk_a_data),
+        .a_dv      (o_blk_dv[1]),
+        .rd_ok     (disp_rd_gate),
 
         // ---- 音频 6 根 ----
         .o_audio_valid(hdmi_audio_valid),
@@ -1426,7 +1437,7 @@ module top_m2 #(
         .dbg_play_tgl (aud_dbg_play_tgl),
         .dbg_aud_dout (aud_dbg_dout),
         .dbg_aud_vld  (aud_dbg_vld),
-        .dbg_tag_bad  (aud_tag_bad),
+        .dbg_blk_stall(aud_blk_stall),
         .dbg_aud_cnt  (aud_dbg_cnt),
         .dbg_aud_sum  (aud_dbg_sum)
     );
@@ -1717,6 +1728,9 @@ module top_m2 #(
         //    25 = 引擎写字拍数(低16) / 26 = 突发次数 / 27 = 读写同拍拍数 / 28 = A 的段长度(低5)
         // ★★ 2026-10-01 实验一：SDRAM 忙 / 刷新 与写使能
         .sb_flags(dbg_busy_flags),
+        // ★★ 2026-10-06：字段 12 的 bit1 从"tag 队列脱钩过"改成
+        //   **音频块级读被看门狗掐断过**（tag 机制整条删掉了，这一位留给音频自检）。
+        .tag_bad(aud_blk_stall),
         // ★★★ 2026-10-05（第 8 条）：字段 30/31/32 从"10-01 那次 SDRAM 忙/刷新实验"
         //     改成【音频数据自检】——那次实验的结论早就有了（那两根线的问题被否掉），
         //     现在这三格更有用：
@@ -1728,9 +1742,14 @@ module top_m2 #(
         //   字段 30 = 官方控制器发过多少次 App_rd_en（0 ⇒ 一次读都没发）
         //   字段 31 = 仲裁器服务完几个块（read_fin 次数）
         //   字段 32 = 读 FIFO 的当前占用 + bit15 = "FIFO 曾经非空过"
+        // ★★★ 2026-10-06【一个下载要能同时验两件事】：
+        //   30 = 读通路整条链的 sticky 位图（显示用）—— 全 1 才算过
+        //   31 = 本次播放音频从 SDRAM 收了多少个字（低 16 位；满 3 秒 = 0x1940）
+        //   32 = 这些字的 32 位和的【低 16 位】（期望 0xB746，见 sfx_checksum.py）
+        //   ⇒ 这一版既有显示、又有音频，一次烧录就能同时判这两条。
         .sb_rise (dbg_chain),
-        .sb_col  (blk_fin_cnt),
-        .rv_col  ({vrd_fifo_seen, 5'd0, vrd_used}),
+        .sb_col  (aud_dbg_cnt[15:0]),
+        .rv_col  (aud_dbg_sum[15:0]),
         .uart_tx(uart_tx)
     );
 
@@ -1811,8 +1830,10 @@ module top_m2 #(
     // ============================================================
     assign disp_rd_en   = 1'b0;
     assign disp_rd_addr = 21'd0;
-    wire   disp_rd_gate = ~(stwr_busy | abusy_block | ~sdr_ready | rd_mute);
+    assign disp_rd_gate = ~(stwr_busy | abusy_block | ~sdr_ready | rd_mute);
     assign d_blk_req    = d_blk_req_raw & disp_rd_gate;
+    // ★ 音频的块请求走【同一道闸门】（装载期间一个读都不发，§6.3-1 红线）。
+    assign aud_a_req_g  = aud_a_req & disp_rd_gate;
 
     // ============================================================
     //  8. 数码管：显示 dbg_wr_cnt（正常 03A980）—— 以串口为准，这是参考

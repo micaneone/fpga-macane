@@ -81,31 +81,30 @@ module top_aud #(
     output wire        busy,            // 1 = 还在读/放
 
     // ==================================================================
-    //  三、★ 接 line_buf（显示的读口）
-    //      原来是：line_buf.mem_rd_en/addr ──直连──► sdr_arb.disp_rd_en/addr
-    //              Sdr_rd_dout/Sdr_rd_en   ──直连──► line_buf.mem_rd_data/vld
-    //      现在把两端都接到这里来（line_buf.v 和 sdr_arb.v 一行不用改）
+    //  三、★★★ 2026-10-06【集成侧重做】音频不再"逐拍抢读口"
+    //
+    //  原来是：line_buf ──逐字──► sdr_rd_arb ──逐字──► sdr_arb 的读口，
+    //          音频趁"显示没发读的那一拍"插一个地址进去，回来靠 tag 队列分流。
+    //          ★ 上板结论：这颗核受不了两个地址流被逐拍交织 —— 音频听到
+    //            "沙沙声"、而且**跟着显示的读流量变大**（1536 宽的图最响）。
+    //
+    //  现在：显示走【块级】读通路（rtl\blk_rd_arb.v + rtl\vendor_rd_path.v），
+    //        音频也走同一个仲裁器的**音频口**（a_* 这一组）——
+    //        **谁拿到读口谁整块读完，块与块之间不交叠** ⇒ 不需要 tag 队列，
+    //        也不会交织。显示永远优先（仲裁器只在显示没有块请求时才接音频）。
+    //
+    //  ★ 与 A 的接口：sfx_ctrl / sfx_player / audio_arc_calculate 一个字没改，
+    //    只把中间那层换成 a_image\aud_blk_rd.v（B 新写的块级客户端）。
+    //    ⇒ 转给 A 的条目见 规划\A轨待改清单.md。
     // ==================================================================
-    input  wire        line_rd_req,     // ← line_buf.mem_rd_en
-    input  wire [20:0] line_rd_addr,    // ← line_buf.mem_rd_addr
-    output wire [31:0] line_rd_data,    // → line_buf.mem_rd_data
-    output wire        line_rd_vld,     // → line_buf.mem_rd_vld
-
-    // ==================================================================
-    //  四、★ 接 sdr_arb 的读口（原来 line_buf 直连的那两根）
-    // ==================================================================
-    output wire        sdr_rd_en,       // → sdr_arb.disp_rd_en
-    output wire [20:0] sdr_rd_addr,     // → sdr_arb.disp_rd_addr
-
-    // ==================================================================
-    //  五、★ 接 SDRAM 控制器（读数据回来）
-    // ==================================================================
-    input  wire [31:0] mem_rd_dout,     // ← sdram.Sdr_rd_dout
-    input  wire        mem_rd_vld,      // ← sdram.Sdr_rd_en
-    // ★★ 集成临时改动（见 规划\A轨待改清单.md 2026-10-05 第 6 条）：
-    //    SDRAM 核的忙 / 刷新标志，直接透传给 sdr_rd_arb（只用来推迟音频的读）
-    input  wire        sdr_busy,        // ← sdram.Sdr_busy
-    input  wire        sdr_init_ref_vld,// ← sdram.Sdr_init_ref_vld
+    output wire        a_req,           // → blk_rd_arb.a_req
+    output wire [20:0] a_base,          // → blk_rd_arb.a_base
+    output wire [20:0] a_len,           // → blk_rd_arb.a_len
+    input  wire        a_gnt,           // ← blk_rd_arb.a_gnt
+    output wire        a_next,          // → blk_rd_arb.a_next（收集期间恒 1）
+    input  wire [31:0] a_data,          // ← blk_rd_arb.a_data
+    input  wire        a_dv,            // ← blk_rd_arb.o_dv[1]
+    input  wire        rd_ok,           // 1 = 现在允许读（装载期间顶层压 0）
 
     // ==================================================================
     //  六、★ 接 HDMI（6 根，接进 HDMI 核 / my_hdmitop）
@@ -125,7 +124,7 @@ module top_aud #(
     output wire        dbg_play_tgl,    // 播放命令的 toggle（ILA 上看翻转）
     output wire [31:0] dbg_aud_dout,    // 音频数据流（音频域）
     output wire        dbg_aud_vld,
-    output wire        dbg_tag_bad,     // ★ 集成临时改动：tag 队列脱钩过（sticky）
+    output wire        dbg_blk_stall,   // ★ 块级读看门狗掐断过（sticky）
     output wire [15:0] dbg_aud_cnt,     // ★★ 第 8 条：音频数据自检（本次播放收了多少字）
     output wire [31:0] dbg_aud_sum      // ★★ 第 8 条：音频数据自检（这些字的 32 位和）
 );
@@ -178,36 +177,32 @@ module top_aud #(
     );
 
     // ============================================================
-    //  ② sdr_rd_arb —— SDRAM 读口仲裁 + 读音频数据
-    //     时钟域：显存域 125 MHz（仲裁）+ 音频域（数据 FIFO）
-    //     ★ 显示的读口就是在这儿"绕道"的
+    //  ② aud_blk_rd —— 音频的【块级】读客户端（替换原来的 sdr_rd_arb）
+    //     时钟域：显存域 125 MHz（排块 + FIFO 写）+ 音频域（FIFO 读）
+    //     ★ 它对外只有一组块口（a_*），接到顶层 blk_rd_arb 的音频口；
+    //       读口怎么和显示分，全部归那个仲裁器管。
     // ============================================================
-    sdr_rd_arb u_sdr_rd_arb (
+    aud_blk_rd #(
+        .BLK_WORDS (64),        // 一次 64 字（= 2.67 ms 的音频，够粗够省）
+        .AFIFO_AW  (9)          // FIFO 512 字 ≈ 21 ms，够扛一帧的抖动
+    ) u_aud_blk_rd (
         .clk_mem       (clk_mem),
         .rst_mem_n     (rst_mem_n),
-
-        // ---- 显示申请人（接 line_buf）----
-        .disp_rd_en    (line_rd_req),
-        .disp_rd_addr  (line_rd_addr),
-        .disp_rd_data  (line_rd_data),
-        .disp_rd_vld   (line_rd_vld),
-
-        // ---- 去 sdr_arb 的读口 ----
-        .rd_en         (sdr_rd_en),
-        .rd_addr       (sdr_rd_addr),
-
-        // ---- SDRAM 控制器回来的 ----
-        .sdr_rd_dout   (mem_rd_dout),
-        .sdr_rd_en     (mem_rd_vld),
-        // ★★ 集成临时改动（见 规划\A轨待改清单.md 2026-10-05 第 6 条）：
-        //    忙/刷新标志透传（只用来推迟音频的读，绝不挡显示）
-        .sdr_busy         (sdr_busy),
-        .sdr_init_ref_vld (sdr_init_ref_vld),
+        .rd_ok         (rd_ok),
 
         // ---- 播放命令（从 sfx_ctrl 来）----
         .aud_play_tgl  (play_tgl),
         .aud_base      (sfx_base),
         .aud_words     (sfx_words),
+
+        // ---- 块口（顶层接 blk_rd_arb 的音频口）----
+        .a_req         (a_req),
+        .a_base        (a_base),
+        .a_len         (a_len),
+        .a_gnt         (a_gnt),
+        .a_next        (a_next),
+        .a_data        (a_data),
+        .a_dv          (a_dv),
 
         // ---- 音频域：把数据交给 sfx_player ----
         .clk_aud       (clk_aud),
@@ -216,9 +211,11 @@ module top_aud #(
         .aud_vld       (aud_vld),
         .aud_next      (aud_next),
         .aud_busy      (aud_busy),
-        .o_tag_bad     (dbg_tag_bad),
-        .aud_dbg_cnt   (dbg_aud_cnt),
-        .aud_dbg_sum   (dbg_aud_sum)
+
+        .dbg_cnt       (dbg_aud_cnt),
+        .dbg_sum       (dbg_aud_sum),
+        .dbg_blk_cnt   (),
+        .o_stall       (dbg_blk_stall)
     );
 
     // ============================================================

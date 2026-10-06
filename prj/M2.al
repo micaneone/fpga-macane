@@ -660,6 +660,14 @@
                     <Attr Name="CompileOrder" Val="81"/>
                 </FileInfo>
             </File>
+            <File Path="../a_image/aud_blk_rd.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="82"/>
+                </FileInfo>
+            </File>
         </Verilog>
         <VHDL>
             <File Path="al_ip/PLL_0.vhd">

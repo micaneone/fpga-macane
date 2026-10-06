@@ -32,7 +32,13 @@
 `timescale 1ns / 1ps
 
 module blk_rd_arb #(
-    parameter integer RD_LEAD = 21'd1      // 提前几拍把 read_req 举起来（留给跨域/状态机）
+    parameter integer RD_LEAD = 21'd1,     // 提前几拍把 read_req 举起来（留给跨域/状态机）
+    // ★★★ 2026-10-06【服务态看门狗】：一块授权出去之后，只要申请方一直
+    //   不取字（`x_next` 不给）或者 SDRAM 一直不回数据，状态机会**永远停在
+    //   S_SERV** —— 那样读口就被这一块攥死，**显示也读不了 ⇒ 白屏**。
+    //   所以：连续这么多拍没有任何一个字被取走，就放弃这一块、把读口放回去。
+    //   8192 拍 @125MHz ≈ 65 µs，和 line_buf 自己的看门狗同量级。
+    parameter integer SERV_MAX = 8192
 )(
     input  wire        clk_mem,
     input  wire        rst_mem_n,
@@ -80,7 +86,8 @@ module blk_rd_arb #(
 
     // ---- 诊断 ----
     output reg  [15:0] o_blk_cnt,          // 服务过多少块（累计）
-    output reg  [15:0] o_aud_blk_cnt       // 其中多少块是音频
+    output reg  [15:0] o_aud_blk_cnt,      // 其中多少块是音频
+    output reg         o_timeout           // 1 = 看门狗掐断过（sticky）
 );
 
     // ============================================================
@@ -109,6 +116,7 @@ module blk_rd_arb #(
     //   由 `o_dv` 的脉冲（= take_ok 打两拍）告诉申请方"这一拍有效"。
     reg         take_d1, take_d2;
     reg         owner_d1, owner_d2;        // 跟着打两拍的所有者（dv 要和对齐）
+    reg  [13:0] serv_cnt;                  // ★ 服务态看门狗计数（有字取走就清零）
 
     wire        cur_req  = owner ? a_req  : d_req;
     wire        cur_next = owner ? a_next : d_next;
@@ -137,11 +145,16 @@ module blk_rd_arb #(
             take_dv_r <= 1'b0;
             o_blk_cnt     <= 16'd0;
             o_aud_blk_cnt <= 16'd0;
+            o_timeout     <= 1'b0;
+            serv_cnt      <= 14'd0;
         end
         else begin
             d_done <= 1'b0;
             a_done <= 1'b0;
             take_dv_r <= take_ok;          // ★ 唯一赋值处
+            // ---- 看门狗计数：这一拍取走一个字就清零，否则累加 ----
+            if (take_ok)                       serv_cnt <= 14'd0;
+            else if (serv_cnt != 14'h3FFF)     serv_cnt <= serv_cnt + 14'd1;
 
             case (st)
             // ---- 等申请：显示优先 ----
@@ -177,6 +190,11 @@ module blk_rd_arb #(
                     rd_req <= 1'b0;
                     if (owner) a_gnt <= 1'b1;
                     else       d_gnt <= 1'b1;
+                    // ★★★ 看门狗计数**必须在这里清零**：它是"这一块已经被拿走多少拍
+                    //   还没进一个字"的计数。空闲期间（行间 26 µs）它一直加到饱和，
+                    //   不在这里清的话，一块刚授权就立刻超时 ⇒ 一个字都取不到
+                    //   （仿真里：arb 在 S_REQ→S_SERV→S_IDLE 之间空转，dv 永远是 0）。
+                    serv_cnt <= 14'd0;
                     st     <= S_SERV;
                     if (o_blk_cnt != 16'hFFFF)      o_blk_cnt     <= o_blk_cnt + 16'd1;
                     if (owner && o_aud_blk_cnt != 16'hFFFF) o_aud_blk_cnt <= o_aud_blk_cnt + 16'd1;
@@ -188,7 +206,29 @@ module blk_rd_arb #(
                 rd_en <= take_ok;                       // 取一个字（数据下一拍回来）
                 if (take_ok) take_cnt <= take_cnt + 21'd1;
                 if (take_last) begin
+                    // ★★★ 2026-10-06【必须在这里就撤授权】：
+                    //   这一块的字**已经全部交付完了**，但官方的 read_finish 还要
+                    //   等整串突发跑完（blk_len 通常不是 128 的整数倍），这中间
+                    //   状态机停在 S_TAIL —— 如果 `a_gnt` 还举着，申请方**下一个**
+                    //   块请求会看到这个【上一块的旧授权】，误以为自己的新请求
+                    //   已经被受理（然后 FSM 去收集、申请方把 req 撤掉），
+                    //   等 S_TAIL 结束撤掉授权时那个请求就**再也回不来**了。
+                    //   仿真里这条一眼可见：第 1 块 64 字正确，第 2 块起
+                    //   "受理 100 次、一个字都收不到"，两头看门狗轮流掐断。
+                    if (owner) a_gnt <= 1'b0;
+                    else       d_gnt <= 1'b0;
                     st <= S_TAIL;
+                end
+                // ★★★ 2026-10-06 看门狗：一直没人取字（申请方卡住 /
+                //   SDRAM 一直不回）就把这一块放掉、读口还回去 ——
+                //   **绝不让显示被音频（或任何申请方）堵死**。
+                else if (serv_cnt >= SERV_MAX[13:0]) begin
+                    o_timeout <= 1'b1;
+                    if (owner) a_gnt <= 1'b0;
+                    else       d_gnt <= 1'b0;
+                    rd_req  <= 1'b0;
+                    rd_en   <= 1'b0;
+                    st      <= S_IDLE;
                 end
             end
 
@@ -198,6 +238,14 @@ module blk_rd_arb #(
                 if (rd_fin) begin
                     if (owner) begin a_gnt <= 1'b0; a_done <= 1'b1; end
                     else       begin d_gnt <= 1'b0; d_done <= 1'b1; end
+                    st <= S_IDLE;
+                end
+                // ★ 收尾也兜一个底：官方的 read_finish 只亮一拍，万一它在我们
+                //   进 S_TAIL 之前就过去了（FIFO 够深时是可能的），这里不能死等。
+                else if (serv_cnt >= SERV_MAX[13:0]) begin
+                    o_timeout <= 1'b1;
+                    if (owner) a_gnt <= 1'b0;
+                    else       d_gnt <= 1'b0;
                     st <= S_IDLE;
                 end
             end

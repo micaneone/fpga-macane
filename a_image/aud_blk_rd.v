@@ -1,0 +1,289 @@
+// ============================================================
+//  aud_blk_rd —— 音频读的【块级客户端】（B 侧集成模块，2026-10-06）
+//
+//  它替代 A 的 `sdr_rd_arb`：**读口不再和显示逐拍抢**，而是像显示一样
+//  用【一整块】去申请读口（`blk_rd_arb` 的音频口），块与块之间不交叠。
+//
+//  为什么要换（这是这一周的结论，证据见 规划\B轨待改清单.md §18）：
+//    · 旧做法是"音频趁显示没发读的那一拍插一个地址进去"，回来的数据靠
+//      一条 **tag 队列** 分清谁是谁。两个问题：
+//        ① 这颗 SDRAM 核受不了两个地址流被逐拍交织 —— 偶尔读回错值：
+//           对显示 = 一个看不见的错像素（白条闪），对音频 = 一声"沙"；
+//           而且**杂音随显示的读流量走**（1536 宽的图最响，正好 2.4 倍）。
+//        ② tag 队列一旦和读返回脱钩就永久回不来（虽然实测没脱钩过）。
+//    · 新做法：**谁拿到读口谁整块读完**，回来的数据只可能属于当前这一块
+//      ⇒ 既不需要 tag 队列，也不会交织。
+//
+//  数据流：
+//    控制域 play 命令（toggle）→ 本模块（显存域）排块：
+//      一次要 BLK_WORDS 个字（默认 64），凑不满就少要点（最后一块）
+//      → blk_rd_arb 音频口 → 官方读通路 → SDRAM
+//    每收到一个字（a_dv 脉冲 + a_data）就写进下面这个【跨时钟 FIFO】，
+//    音频域按 aud_next 消费 —— 接口和 A 原来那版一模一样，
+//    `sfx_player` / `sfx_ctrl` 一个字都不用改。
+//
+//  ★ 三个安全设计（都是"绝不让显示被音频拖住"）：
+//    ① **有空间才要块**：FIFO 必须装得下一整块才发申请
+//       （否则申请方收不动 ⇒ 块永远收不满 ⇒ 仲裁器卡在服务态 ⇒ 显示被堵死）。
+//    ② `a_next` 在收集期间**恒为 1**：仲裁器数够 blk_len 自己会停，
+//       不靠申请方的"还要不要"来收尾，少一个卡死的入口。
+//    ③ 看门狗：一块收超过 SERV_MAX 拍就放弃、把状态机放回 IDLE
+//       （仲裁器那边另有一个同样的看门狗，两头都兜底）。
+//
+//  ★ 时钟：FIFO 是**手写的双时钟 FIFO**（格雷码指针），和 A 原来那版逐行
+//    一致 —— 它已经上板跑通过（能听出音乐），不改成厂商 IP 是为了不引入
+//    新变量（SHOW_AHEAD/OUTREG 那些性子会牵动 sfx_player 的取数协议）。
+//
+//  ★★★ 声明全部前置（这个工程踩过五次"先用后声明"）
+// ============================================================
+`timescale 1ns / 1ps
+
+module aud_blk_rd #(
+    parameter integer BLK_WORDS = 64,       // 一次块请求多少字
+    parameter integer AFIFO_AW  = 9,        // 跨域 FIFO 深度 = 2^9 = 512 字
+    parameter integer SERV_MAX  = 20000     // 看门狗：一块最多等多少拍（@125MHz ≈ 160 µs）
+)(
+    // ---------------- 显存域 125 MHz ----------------
+    input  wire        clk_mem,
+    input  wire        rst_mem_n,
+    input  wire        rd_ok,           // 1 = 现在允许读（装载期间由顶层压 0）
+
+    // ---- 播放命令（控制域 sfx_ctrl 的 toggle + 基址/字数）----
+    input  wire        aud_play_tgl,
+    input  wire [20:0] aud_base,
+    input  wire [20:0] aud_words,
+
+    // ---- 块口 → blk_rd_arb 的音频口 ----
+    output wire        a_req,
+    output reg  [20:0] a_base,
+    output reg  [20:0] a_len,
+    input  wire        a_gnt,
+    output wire        a_next,
+    input  wire [31:0] a_data,
+    input  wire        a_dv,
+
+    // ---------------- 音频域（12.288 MHz）----------------
+    input  wire        clk_aud,
+    input  wire        rst_aud_n,
+    output wire [31:0] aud_dout,
+    output wire        aud_vld,
+    input  wire        aud_next,
+    output wire        aud_busy,
+
+    // ---------------- 诊断 ----------------
+    output reg  [15:0] dbg_cnt,         // 本次播放从 SDRAM 收了多少个字（饱和）
+    output reg  [31:0] dbg_sum,         // 这些字的 32 位累加和
+    output reg  [15:0] dbg_blk_cnt,     // 一共服务完多少块
+    output reg         o_stall          // 1 = 看门狗掐断过（sticky）
+);
+
+    // ============================================================
+    //  ★ 声明全部前置
+    // ============================================================
+    localparam integer AFIFO_DEPTH = (1 << AFIFO_AW);
+    // 发块之前 FIFO 里最多允许多少字（保证整块装得下）
+    localparam [AFIFO_AW:0] ROOM_LIMIT = (1 << AFIFO_AW) - BLK_WORDS;
+
+    localparam [1:0] S_IDLE = 2'd0,
+                     S_REQ  = 2'd1,
+                     S_COL  = 2'd2;
+
+    reg  [1:0]  st;
+    reg         run;                        // 一次播放还没发够请求
+    reg         a_req_r;                    // 内部请求（再过 rd_ok 出门）
+    reg  [20:0] a_base_r, a_words_r;        // 本次播放的基址/字数（同步过来的）
+    reg  [20:0] issued;                     // 已经申请出去多少个字
+    reg  [20:0] got;                        // 当前这一块已经收到多少个字
+    reg  [20:0] cur_len;                    // 当前这一块要多少字
+    reg  [15:0] wait_cnt;                   // 看门狗
+
+    // ---- 跨域 FIFO（手写，格雷码指针）----
+    reg  [31:0] afifo [0:AFIFO_DEPTH-1];
+    reg  [AFIFO_AW:0] awp;                  // 写指针（显存域）
+    reg  [AFIFO_AW:0] arp;                  // 读指针（音频域）
+    reg  [AFIFO_AW:0] argray_sync;          // 读指针同步回显存域
+    reg  [AFIFO_AW:0] wgray_s1, wgray_s2;   // 写指针同步到音频域
+
+    // ---- 命令同步（显存域）----
+    reg         ap1, ap2, ap3;
+    reg  [20:0] a_base_s1, a_base_s2;
+    reg  [20:0] a_words_s1, a_words_s2;
+    integer     i;
+
+    wire        a_play_pulse = ap2 ^ ap3;   // toggle 变化 = 一条新命令
+    wire [AFIFO_AW:0] argray_bin = gray2bin(argray_sync);
+    wire [AFIFO_AW:0] wrp_bin    = gray2bin(wgray_s2);
+    wire [AFIFO_AW:0] afifo_used_m = awp - argray_bin;    // 显存域口径（偏保守）
+    wire [AFIFO_AW:0] afifo_cnt    = wrp_bin - arp;       // 音频域口径
+
+    // 下一块要多少字：够 BLK_WORDS 就给整块，最后一块少给点
+    wire [20:0] words_left = a_words_r - issued;
+    wire [20:0] next_len   = (words_left > BLK_WORDS[20:0]) ? BLK_WORDS[20:0] : words_left;
+    // 有空间才要（★ 保证整块装得下，见文件头安全设计①）
+    wire        room_now   = (afifo_used_m <= ROOM_LIMIT);
+
+    // ---- 工具函数（和 A 那版一致）----
+    function [AFIFO_AW:0] bin2gray;
+        input [AFIFO_AW:0] b;
+        begin
+            bin2gray = b ^ (b >> 1);
+        end
+    endfunction
+    function [AFIFO_AW:0] gray2bin;
+        input [AFIFO_AW:0] g;
+        integer k;
+        begin
+            gray2bin[AFIFO_AW] = g[AFIFO_AW];
+            for (k = AFIFO_AW-1; k >= 0; k = k - 1)
+                gray2bin[k] = gray2bin[k+1] ^ g[k];
+        end
+    endfunction
+
+    // ============================================================
+    //  一、命令 / 基址 / 字数同步到显存域
+    // ============================================================
+    always @(posedge clk_mem or negedge rst_mem_n) begin
+        if (!rst_mem_n) begin
+            a_base_s1 <= 21'd0;  a_base_s2 <= 21'd0;
+            a_words_s1<= 21'd0;  a_words_s2<= 21'd0;
+            ap1 <= 1'b0; ap2 <= 1'b0; ap3 <= 1'b0;
+        end
+        else begin
+            a_base_s1  <= aud_base;   a_base_s2  <= a_base_s1;
+            a_words_s1 <= aud_words;  a_words_s2 <= a_words_s1;
+            ap1 <= aud_play_tgl; ap2 <= ap1; ap3 <= ap2;
+        end
+    end
+    always @(posedge clk_mem or negedge rst_mem_n) begin
+        if (!rst_mem_n) argray_sync <= {(AFIFO_AW+1){1'b0}};
+        else            argray_sync <= bin2gray(arp);
+    end
+
+    // ============================================================
+    //  二、显存域：排块 + 收字进 FIFO
+    // ============================================================
+    always @(posedge clk_mem or negedge rst_mem_n) begin
+        if (!rst_mem_n) begin
+            st          <= S_IDLE;
+            run         <= 1'b0;
+            a_req_r     <= 1'b0;
+            a_base      <= 21'd0;
+            a_len       <= 21'd0;
+            a_base_r    <= 21'd0;
+            a_words_r   <= 21'd0;
+            issued      <= 21'd0;
+            got         <= 21'd0;
+            cur_len     <= 21'd0;
+            wait_cnt    <= 16'd0;
+            awp         <= {(AFIFO_AW+1){1'b0}};
+            dbg_cnt     <= 16'd0;
+            dbg_sum     <= 32'd0;
+            dbg_blk_cnt <= 16'd0;
+            o_stall     <= 1'b0;
+        end
+        else begin
+            // ---- ① 收一条播放命令：重排这一次的全部块 ----
+            if (a_play_pulse) begin
+                a_base_r  <= a_base_s2;
+                a_words_r <= a_words_s2;
+                issued    <= 21'd0;
+                got       <= 21'd0;
+                a_req_r   <= 1'b0;
+                st        <= S_IDLE;
+                run       <= 1'b1;
+                dbg_cnt   <= 16'd0;
+                dbg_sum   <= 32'd0;
+            end
+
+            // ---- ② 收数据：一个 a_dv 一个字 ----
+            //   ★ 命令那一拍不收（避免和上面的清零打架）
+            if (a_dv && !a_play_pulse) begin
+                afifo[awp[AFIFO_AW-1:0]] <= a_data;
+                awp                      <= awp + 1'b1;
+                got                      <= got + 21'd1;
+                wait_cnt                 <= 16'd0;
+                if (dbg_cnt != 16'hFFFF) dbg_cnt <= dbg_cnt + 16'd1;
+                dbg_sum                  <= dbg_sum + a_data;
+            end
+            else if (wait_cnt != 16'hFFFF) wait_cnt <= wait_cnt + 16'd1;
+
+            // ---- ③ 块调度状态机 ----
+            case (st)
+            // ---- 等"还要不要块" ----
+            S_IDLE: begin
+                a_req_r <= 1'b0;
+                if (run && (issued < a_words_r)) begin
+                    if (room_now) begin
+                        a_base  <= a_base_r + issued;
+                        a_len   <= next_len;
+                        cur_len <= next_len;
+                        a_req_r <= 1'b1;
+                        wait_cnt<= 16'd0;
+                        st      <= S_REQ;
+                    end
+                end
+                else if (run) begin
+                    run <= 1'b0;            // 全部申请完了
+                end
+            end
+            // ---- 等仲裁器受理 ----
+            S_REQ: begin
+                if (a_gnt) begin
+                    a_req_r  <= 1'b0;
+                    got      <= 21'd0;
+                    wait_cnt <= 16'd0;
+                    if (dbg_blk_cnt != 16'hFFFF) dbg_blk_cnt <= dbg_blk_cnt + 16'd1;
+                    st       <= S_COL;
+                end
+            end
+            // ---- 收这一块（a_next 恒 1，见文件头安全设计②）----
+            S_COL: begin
+                if (a_dv && !a_play_pulse && ((got + 21'd1) >= cur_len)) begin
+                    issued <= issued + cur_len;
+                    st     <= S_IDLE;
+                end
+                else if (wait_cnt >= SERV_MAX[15:0]) begin
+                    // ★ 看门狗：这一块收不齐了。已经收的先认账，剩下的跳过；
+                    //   仲裁器那边的看门狗会把读口放回去（绝不会堵死显示）。
+                    o_stall <= 1'b1;
+                    issued  <= issued + got;
+                    a_req_r <= 1'b0;
+                    st      <= S_IDLE;
+                end
+            end
+            default: st <= S_IDLE;
+            endcase
+        end
+    end
+
+    // ★ 请求电平：装载期间由顶层 `rd_ok` 压住（仲裁器只在 S_IDLE 看这一拍，
+    //   所以"压住又放开"不会丢请求）
+    assign a_req  = a_req_r & rd_ok;
+    assign a_next = (st == S_COL);
+    assign aud_busy = run;
+
+    // ============================================================
+    //  三、音频域：从 FIFO 取（和 A 那版逐行一致）
+    // ============================================================
+    always @(posedge clk_aud or negedge rst_aud_n) begin
+        if (!rst_aud_n) begin
+            arp      <= {(AFIFO_AW+1){1'b0}};
+            wgray_s1 <= {(AFIFO_AW+1){1'b0}};
+            wgray_s2 <= {(AFIFO_AW+1){1'b0}};
+        end
+        else begin
+            wgray_s1 <= bin2gray(awp);
+            wgray_s2 <= wgray_s1;
+            if (aud_next) arp <= arp + 1'b1;
+        end
+    end
+
+    assign aud_dout = afifo[arp[AFIFO_AW-1:0]];
+    assign aud_vld  = (afifo_cnt != {(AFIFO_AW+1){1'b0}});
+
+    // ---- 初始化一下 FIFO 内容（仿真/上电时别读 X；上板不需要但无害）----
+    initial begin
+        for (i = 0; i < AFIFO_DEPTH; i = i + 1) afifo[i] = 32'd0;
+    end
+
+endmodule
