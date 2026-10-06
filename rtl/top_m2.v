@@ -136,6 +136,14 @@ module top_m2 #(
     // ★★ 关键实验用：自测图正在写的时候，把"显示的读"关掉
     //    （M0 踩过"读写同时抢同一颗 SDRAM → 读出来的数据是错的"这个坑）
     wire        disp_rd_en_g;
+    // ★★★ 2026-10-06：块级读通路的连线（见第 3b 节）
+    wire        d_blk_req_raw;              // 行缓冲的块请求（未过闸门）
+    wire        d_blk_req;                  // 过了"装载期间禁读"闸门的块请求
+    wire [20:0] d_blk_base, d_blk_len;
+    wire        d_blk_want;
+    wire        blk_rd_req, blk_rd_re;
+    wire [20:0] blk_rd_base, blk_rd_len;
+
     // ★ 显示链的读请求/读地址（disp_top 的输出）—— 提前声明：
     //   下面 0c 节"只放行到显示没在读的窗口"要用它（ModelSim 不许先用后声明）
     wire        disp_rd_en;
@@ -877,9 +885,65 @@ module top_m2 #(
         // ★ 存储本体挪到顶层了：App 接口引出去，顶层接 sdram
         .App_wr_en(sdr_wr_en), .App_wr_addr(sdr_wr_addr),
         .App_wr_dm(sdr_wr_dm), .App_wr_din(sdr_wr_din),
-        .App_rd_en(sdr_rd_en), .App_rd_addr(sdr_rd_addr),
+        // ★★★ 2026-10-06：**读口不再由 sdr_arb 驱动**（交给下面的 vendor_rd_path）
+        .App_rd_en(), .App_rd_addr(),
         .Sdr_init_done(sdr_init_done), .Sdr_init_ref_vld(sdr_init_ref_vld),
         .Sdr_busy(sdr_busy)
+    );
+
+    // ============================================================
+    //  3b. ★★★ 2026-10-06：**官方读通路**（块级）—— 显示的行取数走这里
+    //      · vendor_rd_path = frame_fifo_read + 读 FIFO（把 wrusedw 引出来）
+    //      · blk_rd_arb     = 块级仲裁（显示优先；音频口留着，现在音频关着）
+    //      · 读口 sdr_rd_en/sdr_rd_addr 由 vendor_rd_path 驱动（sdram 那两行不用改）
+    //      · 读写互斥仍靠 disp_rd_gate（装载期间不许发块请求）
+    // ============================================================
+    wire        vrd_ack, vrd_fin, vrd_used_nz, vrd_busy;
+    wire [31:0] vrd_dout;
+    wire        blk_d_gnt, blk_d_dv;
+    wire [31:0] blk_d_data;
+
+    vendor_rd_path u_vrd (
+        .clk_mem          (clk_sdr),
+        .rst_mem_n        (sys_rst_n),
+        .sdr_init_done    (sdr_init_done),
+        .sdr_init_ref_vld (sdr_init_ref_vld),
+        .sdr_busy         (sdr_busy),
+        // 读口（独占 SDRAM）
+        .App_rd_en        (sdr_rd_en),
+        .App_rd_addr      (sdr_rd_addr),
+        .Sdr_rd_en        (rd_vld),
+        .Sdr_rd_dout      (rd_data),
+        // 块请求
+        .rd_req           (blk_rd_req),
+        .rd_ack           (vrd_ack),
+        .rd_fin           (vrd_fin),
+        .rd_base          (blk_rd_base),
+        .rd_len           (blk_rd_len),
+        // 取数
+        .rd_re            (blk_rd_re),
+        .rd_dout          (vrd_dout),
+        .rd_valid         (),
+        .rd_used          (),
+        .rd_used_nz       (vrd_used_nz),
+        .o_rd_busy        (vrd_busy)
+    );
+
+    blk_rd_arb u_blk (
+        .clk_mem        (clk_sdr), .rst_mem_n(sys_rst_n),
+        // 官方读侧
+        .rd_req         (blk_rd_req), .rd_ack(vrd_ack), .rd_fin(vrd_fin),
+        .rd_base        (blk_rd_base), .rd_len(blk_rd_len),
+        .rd_en          (blk_rd_re), .rd_data(vrd_dout),
+        .rd_used_nz     (vrd_used_nz),
+        // 显示口（接到 disp_top 的 blk_*）
+        .d_req          (d_blk_req), .d_base(d_blk_base), .d_len(d_blk_len),
+        .d_gnt          (blk_d_gnt), .d_next(d_blk_want),
+        .d_data         (blk_d_data), .d_dv(blk_d_dv), .d_done(),
+        // 音频口：现在音频关着（AUDIO_OFF=1），先挂空
+        .a_req          (1'b0), .a_base(21'd0), .a_len(21'd0),
+        .a_gnt          (), .a_next(1'b0), .a_data(), .a_dv(), .a_done(),
+        .o_blk_cnt      (), .o_aud_blk_cnt()
     );
 
     // ============================================================
@@ -1246,10 +1310,11 @@ module top_m2 #(
         .win_x0(win_x0), .win_y0(win_y0), .win_w(win_w), .win_h(win_h),
         .step_q16(z_a_step), .off_u_q16(z_a_offu), .off_v_q16(z_a_offv),
         .clk_mem(clk_sdr), .rst_mem_n(disp_rst_n),
-        .mem_rd_en(disp_rd_en), .mem_rd_addr(disp_rd_addr),
+        // ★★★ 2026-10-06：块级读通路（原来这里是 mem_rd_en/addr）
+        .blk_req(d_blk_req_raw), .blk_base(d_blk_base), .blk_len(d_blk_len),
         // ★★★ 2026-10-05：读数据不再直连 SDRAM 控制器，而是**经 top_aud 分流**
         //   （top_aud 只把"显示要的那份"给回来，音频的数据它自己收进 FIFO）
-        .mem_rd_vld(line_rd_vld_w), .mem_rd_data(line_rd_data_w), .mem_rd_ok(mem_rd_ok),
+        .blk_gnt(blk_d_gnt), .blk_want(d_blk_want), .blk_dv(blk_d_dv), .blk_data(blk_d_data),
         // ★★ 音频 6 根 → my_hdmitop（同一个像素域）
         .I_audio_valid(hdmi_audio_valid),
         .I_audio_left (hdmi_audio_left),
@@ -1696,6 +1761,18 @@ module top_m2 #(
     end
 
     assign disp_rd_en_g = (stwr_busy | abusy_block | ~sdr_ready | rd_mute) ? 1'b0 : disp_rd_en;
+
+    // ============================================================
+    //  ★★★ 2026-10-06：块级读通路的收尾（放在这里，所有声明都已就位）
+    //    · 旧的"逐拍读请求" `disp_rd_en/disp_rd_addr` 已经没有驱动源了
+    //      （line_buf 改成块级）⇒ 打桩成 0，免得 `aud_line_req`、串口 flags、
+    //      `rd_idle_cnt` 那些老引用悬空。音频现在 AUDIO_OFF=1，本来也不需要它。
+    //    · 块请求走同一个"装载期间禁读"闸门（§6.3-1 红线，条件与上一行完全一致）。
+    // ============================================================
+    assign disp_rd_en   = 1'b0;
+    assign disp_rd_addr = 21'd0;
+    wire   disp_rd_gate = ~(stwr_busy | abusy_block | ~sdr_ready | rd_mute);
+    assign d_blk_req    = d_blk_req_raw & disp_rd_gate;
 
     // ============================================================
     //  8. 数码管：显示 dbg_wr_cnt（正常 03A980）—— 以串口为准，这是参考

@@ -78,12 +78,14 @@ module disp_top #(
     // ---------------- 显存域读口（接 sdr_arb）----------------
     input  wire        clk_mem,
     input  wire        rst_mem_n,
-    output wire        mem_rd_en,
-    output wire [20:0] mem_rd_addr,
-    input  wire        mem_rd_vld,
-    input  wire [31:0] mem_rd_data,
-    // ★ 2026-10-03（不经过米白）：存储那边这一拍能不能收读请求（0 = 等一等）
-    input  wire        mem_rd_ok,
+    // ★★★ 2026-10-06：改成【块级读通路】（见 line_buf 端口说明 + vendor_rd_path/blk_rd_arb）
+    output wire        blk_req,
+    output wire [20:0] blk_base,
+    output wire [20:0] blk_len,
+    input  wire        blk_gnt,
+    output wire        blk_want,
+    input  wire        blk_dv,
+    input  wire [31:0] blk_data,
 
     // ---------------- HDMI 引脚 ----------------
     output wire        HDMI_CLK_P,
@@ -169,9 +171,8 @@ module disp_top #(
         .o_win_a(), .o_win_b(), .o_px_a(cmp_px_a), .o_px_b(cmp_px_b),
         .de_out(de_c), .vs_out(vs_c),
         .clk_mem(clk_mem), .rst_mem_n(rst_mem_n),
-        .mem_rd_en(mem_rd_en), .mem_rd_addr(mem_rd_addr),
-        .mem_rd_vld(mem_rd_vld), .mem_rd_data(mem_rd_data),
-        .mem_rd_ok(mem_rd_ok),
+        .blk_req(blk_req), .blk_base(blk_base), .blk_len(blk_len),
+        .blk_gnt(blk_gnt), .blk_want(blk_want), .blk_dv(blk_dv), .blk_data(blk_data),
         .o_filling(),
         .o_dbg_wbase(dbg_wbase), .o_dbg_fwords(dbg_fwords),
         .o_dbg_rd0(dbg_rd0), .o_dbg_rd1(dbg_rd1),

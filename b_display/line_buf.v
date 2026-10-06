@@ -147,16 +147,8 @@ module line_buf #(
     output wire        o_want,
     input  wire        rd_gnt,
 
-    // ---------------- ★ 读口"这一拍能不能收"（2026-10-03，不经过米白）----------------
-    //  1 = 存储那边这一拍能受理一个读请求；0 = 先别发（**等一等，不是丢掉**）。
-    //  ★ 为什么必须有这个：`sdr_arb` 的读口是直通的，写引擎突发的时候
-    //    读请求和写请求会撞在一起（M0 实测数据会错）。以前的办法是"整段把读掐掉"，
-    //    但那是**有损**的 —— 行缓冲按"发出去多少就收多少"记账，被掐掉的那个字
-    //    永远收不回来，这一行只能等看门狗放弃（屏上那行变底色）。
-    //    现在改成握手：这一拍不能收就**不发、也不计数**，下一拍照发。
-    //  ★ 单路用户接 1'b1 即可（行为与改动前逐位相同）。
-    input  wire        rd_ok,
-
+    // ★★★ 2026-10-06：原来的 `rd_ok`（逐拍握手）**已删** —— 换成下面的【块级读通路】。
+    //    （上板结论：拿 `rd_ok` 当节流旋钮会让整行取不完 ⇒ 白屏，不能再这么用。）
     // ---- ★ 调试探针 / 上板诊断计数（**只在 B_DEBUG_PROBE 定义时才存在**）----
     //  2026-10-01：这些口只为【上板串口报告】服务，默认【不综合、端口都不存在】。
     //    要上板读串口探针（W/S/F、逐行扫描那些）就在工程里加宏 B_DEBUG_PROBE：
@@ -182,10 +174,18 @@ module line_buf #(
     // ---------------- 显存域 125 MHz ----------------
     input  wire        clk_mem,
     input  wire        rst_mem_n,
-    output reg         mem_rd_en,
-    output reg  [20:0] mem_rd_addr,
-    input  wire        mem_rd_vld,
-    input  wire [31:0] mem_rd_data,
+    // ★★★ 2026-10-06 块级读通路（配合 rtl\vendor_rd_path.v + rtl\blk_rd_arb.v）
+    //   ① 一行一次块请求：blk_req 举着 → blk_gnt 受理 → 之后"要字"
+    //   ② blk_want 拉高表示"还要字"；仲裁器**有字才给**（FIFO 非空），
+    //      每交付一个字拉一次 blk_dv，数据就在同一拍的 blk_data 上
+    //   ★ RD_PRE / RD_EXTRA / RD_SKIP 的补偿口径**一个字都没改**（见文件头）
+    output reg         blk_req,
+    output reg  [20:0] blk_base,
+    output reg  [20:0] blk_len,
+    input  wire        blk_gnt,
+    output reg         blk_want,
+    input  wire        blk_dv,
+    input  wire [31:0] blk_data,
 
     // ---- 取数"组内相位"现场可调（mo_sel 0..3，用 key1 试）----
     //  ★★ 2026-09-27 实测把读口的节奏定死了（地址图喂进去，第 208 行打印）：
@@ -448,8 +448,11 @@ module line_buf #(
             frcv        <= 12'd0;
             fwords      <= 12'd0;
             faddr       <= 21'd0;
-            mem_rd_en   <= 1'b0;
-            mem_rd_addr <= 21'd0;
+        // ★★★ 2026-10-06：块级读通路（原来这里是 mem_rd_en / mem_rd_addr）
+        blk_req   <= 1'b0;
+        blk_base  <= 21'd0;
+        blk_len   <= 21'd0;
+        blk_want  <= 1'b0;
             done_tgl_m  <= 1'b0;
             done_buf_m  <= 1'b0;
             stall_cnt   <= 16'd0;
@@ -503,34 +506,32 @@ module line_buf #(
                     //    （左下角 ~34 个像素乱）。这一行退化成"不提前、只丢 1 个字"：
                     //    整行变成"错 4 个像素"，比读出乱码好得多。
                     //    ★ A 把那个 +2 字偏移修好之后，这段保护连同上面的补偿一起删掉。
+                    // ★★★ 2026-10-06：改成"一次块请求"（原来这里是逐字地址发生器）
+                    //   边界保护（行首不足 RD_PRE）与补偿口径原样保留。
                     if (req_wbase >= RD_PRE) begin
-                        faddr       <= req_wbase - RD_PRE;
                         fbase_r     <= req_wbase - RD_PRE;  // 逐字校验/探针用"实际请求起点"
                         fwords      <= req_words + RD_EXTRA;
                         skip_r      <= RD_SKIP;
-                        mem_rd_addr <= req_wbase - RD_PRE;
+                        blk_base    <= req_wbase - RD_PRE;
+                        blk_len     <= req_words + RD_EXTRA;
                     end
                     else begin
-                        faddr       <= 21'd0;
                         fbase_r     <= 21'd0;
                         fwords      <= req_words + 12'd1;   // 只多读 1 个
                         skip_r      <= 2'd1;
-                        mem_rd_addr <= 21'd0;
+                        blk_base    <= 21'd0;
+                        blk_len     <= req_words + 12'd1;
                     end
-                    fbuf      <= req_buf;
-                    fsent     <= 12'd0;
-                    frcv      <= 12'd0;
-                    f_bad     <= 16'd0;          // 本趟的错误字数清零
-                    f_off     <= 16'd0;
-                    // 第一个字先摆上总线（这一组 4 拍里不动）
-                    fcur        <= req_wbase - RD_PRE;
+                    blk_req     <= 1'b1;                // ★ 发块请求（等 blk_gnt）
+                    blk_want    <= 1'b0;
+                    fbuf        <= req_buf;
+                    frcv        <= 12'd0;
+                    f_bad       <= 16'd0;               // 本趟的错误字数清零
+                    f_off       <= 16'd0;
                     gp_cnt      <= 2'd0;
-                    stall_cnt <= 16'd0;
-                        // ★ 2026-10-06 注：曾试过把这里 8 → 128（想排掉"掐断前在途的读"），
-                        //   但上板观察"行没有错位" ⇒ 不是这个原因，已撤回，保持原值。
-                        drain_cnt <= 8'd8;                // 起步稍微安静一下
-                        pass_warm <= 1'b0;                // ★ 从"预热那一遍"开始
-                    filling   <= 1'b1;
+                    stall_cnt   <= 16'd0;
+                    pass_warm   <= 1'b0;                // ★ 从"预热那一遍"开始
+                    filling     <= 1'b1;
                     // 探针：★ 每趟都刷新；p_wbase 记的是【上层要的行首】（不是
                     // 实际请求起点），这样串口里"asked / got1 / got2"三者好对照。
                     p_arm        <= 1'b1;
@@ -545,69 +546,55 @@ module line_buf #(
 `endif
 
             if (filling) begin
-                // ---- 看门狗（见文件头）：太久没数据就放弃这一趟 ----
-                if (mem_rd_vld)            stall_cnt <= 16'd0;
-                else if (stall_cnt != 16'hFFFF) stall_cnt <= stall_cnt + 16'd1;
+                // ---- 看门狗（见文件头）：太久没交付就放弃这一趟 ----
+                if (blk_dv)                          stall_cnt <= 16'd0;
+                else if (stall_cnt != 16'hFFFF)      stall_cnt <= stall_cnt + 16'd1;
 
-                // ★★ 起步静一静：把上一趟读的尾巴先耗掉，这段时间收到的字不算数
-                if (drain_cnt != 8'd0) drain_cnt <= drain_cnt - 8'd1;
+                // ---- 块请求：受理了就撤 ----
+                if (blk_gnt) blk_req <= 1'b0;
 
-                // ---- 发读请求：连发，地址每拍 +1（= 目前实测最优的组合）----
-                //   ★ 试过并排除的组合（都是实测）：
-                //     · 地址举 4 拍 + 每 4 个脉冲收 1 个 → 自测错 1536
-                //     · 地址举 4 拍 + 每个脉冲都收     → 自测错 2047（最差，字重复到 8 个一样）
-                //     · 请求拉稀成 4 拍一个             → 读回全 FFFF（满屏白）
-                //     · 每串 128 个 + 歇 16 拍          → 和连发一样
-                //   所以回到"连发 + 地址每拍 +1 + 每个有效脉冲都收"，错 240/320 是其中最好的。
-                // ★★ 2026-10-03（不经过米白）：再加一个 `rd_ok` ——
-                //    存储那边这一拍不能受理时不发（**也不计数**），下一拍照发。
-                if ((fsent < fwords) && (f_inflight < {4'd0, WORD_CREDIT})
-                    && (drain_cnt == 8'd0) && rd_ok) begin
-                    mem_rd_en   <= 1'b1;
-                    mem_rd_addr <= faddr;
-                    faddr       <= faddr + 21'd1;
-                    fcur        <= faddr;
-                    fsent       <= fsent + 12'd1;
-                end
-                else begin
-                    mem_rd_en <= 1'b0;
-                end
+                // ---- 还要字就要（电平）----
+                //   ★ 取多少不再由我们数信用：**仲裁器只在 FIFO 有字时才交付**
+                //     （所以这里不需要 WORD_CREDIT / f_inflight / rd_ok 那一套了）
+                blk_want <= (frcv < fwords);
 
-                // ---- 收数据：写进缓冲（存的是整个 32 位字，两个像素）----
-                if (mem_rd_vld && (drain_cnt == 8'd0)) begin
+                // ---- 收数据：blk_dv 单拍 + blk_data（一个交付一个字）----
+                if (blk_dv) begin
                     // ★ 见一个有效脉冲收一个字（和 M0 / rd_selftest 一致）
                     // ---- 探针：这一趟的头两个字 ----
                     if (p_arm) begin
                         // ★ 第 RD_SKIP 个起才是"保留下来的"，探针取头两个保留下来的字
-                        if (frcv == {10'd0, skip_r})         p_w0 <= mem_rd_data;
-                        if (frcv == {10'd0, skip_r} + 12'd1) p_w1 <= mem_rd_data;
+                        if (frcv == {10'd0, skip_r})         p_w0 <= blk_data;
+                        if (frcv == {10'd0, skip_r} + 12'd1) p_w1 <= blk_data;
                     end
                     // ---- 逐字对齐校验（地址图里：字的值应当 = 它的地址）----
                     //   第 frcv 个字期望的值 = (实际请求起点 + 3 + frcv) 的低 16 位
-                    if (pass_warm && (mem_rd_data[15:0] != exp_addr[15:0])) begin
+                    if (pass_warm && (blk_data[15:0] != exp_addr[15:0])) begin
                         if (f_bad != 16'hFFFF) f_bad <= f_bad + 16'd1;
                     end
                     // ★ off 探针 = "第 1 个保留字 − 上层要的行首"：
                     //   地址图里它应当 = RD_LAG + RD_SKIP − RD_PRE
                     //   （没有 A 的临时补偿时 = 0；带着补偿时 = +2）
-                    if (pass_warm && (frcv == {10'd0, skip_r})) f_off <= mem_rd_data[15:0] - p_wbase[15:0];
+                    if (pass_warm && (frcv == {10'd0, skip_r})) f_off <= blk_data[15:0] - p_wbase[15:0];
                     // ★ 丢掉本趟收到的前 skip_r 个字；第 k 个（k ≥ skip_r）
                     //   写进缓冲的第 k−skip_r 个位置 → 缓冲正好是这一行的 req_words 个字
                     if (pass_warm && (frcv >= {10'd0, skip_r})) begin
-                        if (fbuf) lb1[slot_w] <= mem_rd_data;
-                        else      lb0[slot_w] <= mem_rd_data;
+                        if (fbuf) lb1[slot_w] <= blk_data;
+                        else      lb0[slot_w] <= blk_data;
                     end
                     frcv <= frcv + 12'd1;
                     if (frcv == fwords - 12'd1) begin
                         if (!pass_warm) begin
-                            // ★ 预热那一遍读完了 → 马上开始第二遍（同一串地址，管线是热的）
+                            // ★ 预热那一遍读完了 → **再发一次块请求**（同一串地址，管线是热的）
+                            //   （原来是"把地址倒回去重发"，块级通路就是重新请求同一个块）
                             pass_warm <= 1'b1;
-                            faddr     <= fbase_r;
-                            fsent     <= 12'd0;
+                            blk_req   <= 1'b1;
+                            blk_want  <= 1'b0;
                             frcv      <= 12'd0;
                         end
                         else begin
                         filling    <= 1'b0;
+                        blk_want   <= 1'b0;
                         done_buf_m <= fbuf;
                         done_tgl_m <= ~done_tgl_m;
 `ifdef B_DEBUG_PROBE
@@ -630,7 +617,8 @@ module line_buf #(
                 else if (stall_cnt >= STALL_MAX[15:0]) begin
                     // 超时：这一趟作废（不置 done，那块保持"没准备好"）
                     filling   <= 1'b0;
-                    mem_rd_en <= 1'b0;
+                    blk_req   <= 1'b0;
+                    blk_want  <= 1'b0;
                     if (p_arm) p_arm <= 1'b0;
 `ifdef B_DEBUG_PROBE
                     if (o_abort_cnt != 16'hFFFF) o_abort_cnt <= o_abort_cnt + 16'd1;
@@ -638,7 +626,8 @@ module line_buf #(
                 end
             end
             else begin
-                mem_rd_en <= 1'b0;
+                blk_req  <= 1'b0;
+                blk_want <= 1'b0;
             end
         end
     end
