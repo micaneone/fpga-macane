@@ -954,6 +954,31 @@ module top_m2 #(
     );
 
     // ============================================================
+    //  ★★★ 2026-10-06 诊断：读通路【整条链】的 sticky 位图（串口字段 30）
+    //   上一版探针已证明"官方控制器一次 App_rd_en 都没发"。那到底卡在链的哪一环？
+    //   这一位图一次就能看出来（每一位一旦置起就保持，直到复位）：
+    //     bit0 = 行缓冲的原始块请求 blk_req 出现过
+    //     bit1 = 过了"装载期间禁读"闸门、仲裁器看到的 d_req 出现过
+    //     bit2 = blk_rd_arb 受理并授权过（read_req_ack 回来过）
+    //     bit3 = blk_rd_arb 把请求转发给官方控制器（rd_req）过
+    //     bit4 = 官方控制器受理（read_req_ack）过
+    //     bit5 = 官方控制器真的发过 App_rd_en（= 驱动 SDRAM 的读使能，就是 sdr_rd_en）
+    //   ★ 判读：从 bit0 往上看，**第一个还是 0 的那一位就是断点**。
+    // ============================================================
+    reg [15:0] dbg_chain;
+    always @(posedge clk_sdr or negedge rst_n) begin
+        if (!rst_n) dbg_chain <= 16'd0;
+        else begin
+            if (d_blk_req_raw) dbg_chain[0] <= 1'b1;
+            if (d_blk_req)     dbg_chain[1] <= 1'b1;
+            if (blk_d_gnt)     dbg_chain[2] <= 1'b1;
+            if (blk_rd_req)    dbg_chain[3] <= 1'b1;
+            if (vrd_ack)       dbg_chain[4] <= 1'b1;
+            if (sdr_rd_en)     dbg_chain[5] <= 1'b1;
+        end
+    end
+
+    // ============================================================
     //  3a. 存储本体：★ 例化在【顶层】（和官方例程 / M0 一样）
     //      原来它套在 sdr_arb 里面（u_arb/u_sdram/sdram），现在挪出来。
     // ============================================================
@@ -1699,7 +1724,7 @@ module top_m2 #(
         //   字段 30 = 官方控制器发过多少次 App_rd_en（0 ⇒ 一次读都没发）
         //   字段 31 = 仲裁器服务完几个块（read_fin 次数）
         //   字段 32 = 读 FIFO 的当前占用 + bit15 = "FIFO 曾经非空过"
-        .sb_rise (vrd_rd_en_cnt),
+        .sb_rise (dbg_chain),
         .sb_col  (blk_fin_cnt),
         .rv_col  ({vrd_fifo_seen, 5'd0, vrd_used}),
         .uart_tx(uart_tx)
