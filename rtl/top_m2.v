@@ -900,7 +900,8 @@ module top_m2 #(
     // ============================================================
     wire        vrd_ack, vrd_fin, vrd_used_nz, vrd_busy;
     wire [31:0] vrd_dout;
-    wire        blk_d_gnt, blk_d_dv;
+    wire        blk_d_gnt;
+    wire [1:0]  o_blk_dv;                  // ★ bit0 = 显示交付（来自 blk_rd_arb.o_dv）
     wire [31:0] blk_d_data;
 
     vendor_rd_path u_vrd (
@@ -939,10 +940,10 @@ module top_m2 #(
         // 显示口（接到 disp_top 的 blk_*）
         .d_req          (d_blk_req), .d_base(d_blk_base), .d_len(d_blk_len),
         .d_gnt          (blk_d_gnt), .d_next(d_blk_want),
-        .d_data         (blk_d_data), .d_dv(blk_d_dv), .d_done(),
+        .d_data         (blk_d_data), .o_dv(o_blk_dv), .d_done(),
         // 音频口：现在音频关着（AUDIO_OFF=1），先挂空
         .a_req          (1'b0), .a_base(21'd0), .a_len(21'd0),
-        .a_gnt          (), .a_next(1'b0), .a_data(), .a_dv(), .a_done(),
+        .a_gnt          (), .a_next(1'b0), .a_data(), .a_done(),
         .o_blk_cnt      (), .o_aud_blk_cnt()
     );
 
@@ -1314,7 +1315,7 @@ module top_m2 #(
         .blk_req(d_blk_req_raw), .blk_base(d_blk_base), .blk_len(d_blk_len),
         // ★★★ 2026-10-05：读数据不再直连 SDRAM 控制器，而是**经 top_aud 分流**
         //   （top_aud 只把"显示要的那份"给回来，音频的数据它自己收进 FIFO）
-        .blk_gnt(blk_d_gnt), .blk_want(d_blk_want), .blk_dv(blk_d_dv), .blk_data(blk_d_data),
+        .blk_gnt(blk_d_gnt), .blk_want(d_blk_want), .blk_dv(o_blk_dv[0]), .blk_data(blk_d_data),
         // ★★ 音频 6 根 → my_hdmitop（同一个像素域）
         .I_audio_valid(hdmi_audio_valid),
         .I_audio_left (hdmi_audio_left),

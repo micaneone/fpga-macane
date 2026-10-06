@@ -61,7 +61,10 @@ module blk_rd_arb #(
     output reg         d_gnt,
     input  wire        d_next,             // 电平：显示"还要字"
     output reg  [31:0] d_data,
-    output wire        d_dv,               // ★ 单拍：d_data 有效（一个字交付）
+    // ★★ 交付脉冲【合并成一个 2 位端口】：bit0 = 显示交付、bit1 = 音频交付。
+    //    为什么不用两根 1 位线：TD 对"同一个 net 被两个分支驱动"很敏感
+    //    （连 `assign x = sel ? a : b;` 这种都报过多驱动），合并成一根就从根上没有二选一。
+    output wire [1:0]  o_dv,
     output reg         d_done,             // 单拍：这个块取完了
 
     // ============================================================
@@ -73,7 +76,6 @@ module blk_rd_arb #(
     output reg         a_gnt,
     input  wire        a_next,
     output reg  [31:0] a_data,
-    output wire        a_dv,               // ★ 单拍：a_data 有效
     output reg         a_done,             // 单拍
 
     // ---- 诊断 ----
@@ -213,8 +215,7 @@ module blk_rd_arb #(
         end
     end
 
-    // ★★★ 交付脉冲：连续赋值分给两家（`take_dv_r` 只在上面的 always 里赋值一次）
-    assign d_dv = take_dv_r & ~owner;
-    assign a_dv = take_dv_r &  owner;
+    // ★★★ 交付脉冲：一根 2 位线，bit0 = 显示、bit1 = 音频
+    assign o_dv = take_dv_r ? (owner ? 2'b10 : 2'b01) : 2'b00;
 
 endmodule
