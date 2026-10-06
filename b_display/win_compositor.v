@@ -270,6 +270,13 @@ module win_compositor #(
 
     reg [1:0] rd_lock;         // 0 = 空 1 = 甲方(前台) 2 = 乙方(后台)
     reg [4:0] rel_cnt;
+    // ★★★ 2026-10-06【改锁】：这一趟"真的开始搬过"吗。
+    //   上板探针证明：请求出现过(bit6=1)、锁也授权过(bit7=1)，但行缓冲一次都没搬起来(bit0=0)。
+    //   病根：锁的释放条件是"拿到锁的那一路连续 RELEASE_GAP 拍不在 filling" —— 可**刚授权的那几拍
+    //   行缓冲还没开始搬（filling 还是 0）**，于是锁被放掉、又立刻重新申请 ⇒ 授权在"刚要搬"的
+    //   那几拍上反复抖 ⇒ `req_go`（要 (边沿|rd_pend) 与 rd_gnt 同时成立）永远差一拍。
+    //   ⇒ 加这个位：**必须看到它真的 filling 过，才允许放锁**（握住了反而把死锁解开）。
+    reg was_filling;
 
     assign gnt_a = (rd_lock == 2'd1);
     assign gnt_b = (rd_lock == 2'd2);
@@ -300,21 +307,27 @@ module win_compositor #(
         if (!rst_mem_n) begin
             rd_lock <= 2'd0;
             rel_cnt <= 5'd0;
+            was_filling <= 1'b0;
         end
         else if (rd_lock == 2'd0) begin
             rel_cnt <= 5'd0;
+            was_filling <= 1'b0;
             // ★ 两人同时开搬时【让甲方先】—— 甲方是现在屏上这位，
             //   错过了这一行就会露出一行底色；乙方这一行可以晚一点补。
             if (ask_a)      rd_lock <= 2'd1;
             else if (ask_b) rd_lock <= 2'd2;
         end
         else begin
+            // ★ 看到"真的在搬"就把 was_filling 锁住
+            if ((gnt_a && o_filling) || (gnt_b && filling_b))
+                was_filling <= 1'b1;
             if ((gnt_a && idle_a) || (gnt_b && idle_b)) begin
-                if (rel_cnt >= RELEASE_GAP[4:0]) begin
+                // ★★ 释放的两个条件：① 这一趟真的搬过（was_filling）② 搬完之后又安静了 RELASE_GAP 拍
+                if (was_filling && (rel_cnt >= RELEASE_GAP[4:0])) begin
                     rd_lock <= 2'd0;
                     rel_cnt <= 5'd0;
                 end
-                else rel_cnt <= rel_cnt + 5'd1;
+                else if (rel_cnt != 5'h1F) rel_cnt <= rel_cnt + 5'd1;
             end
             else rel_cnt <= 5'd0;
         end
