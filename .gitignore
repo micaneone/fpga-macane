@@ -1,0 +1,25 @@
+# M2 上板工程 —— 只跟踪【源码 + 约束 + 脚本 + 比特流历史】，
+# 不跟踪综合/布局布线的中间产物（几百 MB，随时能重新生成）。
+
+# ---- TD 的运行目录：全是中间产物 ----
+prj/M2_Runs/
+
+# ---- 芯片调试器缓存 ----
+prj/chip_debugger/*.cwc
+prj/chip_debugger/*.data
+prj/chip_debugger/compiled.bit
+
+# ---- 锁文件 / 临时 ----
+prj/*.lock.f
+*.log
+*.logw
+*.vstf
+transcript
+
+# ---- 串口抓包、ChipWatcher 导出的波形 ----
+_serial_logs/
+wave/
+
+# ---- 随手放的备份 ----
+*.bak
+*.orig
