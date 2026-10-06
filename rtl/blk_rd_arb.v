@@ -47,6 +47,10 @@ module blk_rd_arb #(
     output reg  [20:0] rd_len,             // → read_len
     output reg         rd_en,              // 从读 FIFO 取一个字
     input  wire [31:0] rd_data,            // rd_en 的【下一拍】有效
+    // ★★★ 2026-10-06：来自 vendor_rd_path 的"FIFO 里现在有几个字"。
+    //   有它才敢"边填边取"：**没字就不发 read_en**（否则取到空 FIFO 是脏数据）。
+    //   也因此不用"等整块读完"，1536 宽的一行 771 字一块就够。
+    input  wire        rd_used_nz,         // FIFO 非空
 
     // ============================================================
     //  二、显示申请人（一行一个块）
@@ -90,7 +94,8 @@ module blk_rd_arb #(
 
     wire        cur_req  = owner ? a_req  : d_req;
     wire        cur_next = owner ? a_next : d_next;
-    wire        take_ok  = (st == S_SERV) && cur_next && (take_cnt < blk_len);
+    // ★ 取数条件：① 在服务中 ② 申请方这一拍要字 ③ 还没取够 ④ **FIFO 里确实有字**
+    wire        take_ok  = (st == S_SERV) && cur_next && (take_cnt < blk_len) && rd_used_nz;
     wire        take_last = take_ok && (take_cnt + 21'd1 >= blk_len);
 
     // ============================================================
