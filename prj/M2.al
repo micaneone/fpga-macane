@@ -596,6 +596,7 @@
             </File>
             <File Path="../a_image/sdr_rd_arb.v">
                 <FileInfo>
+                    <Attr Name="AutoExcluded" Val="true"/>
                     <Attr Name="UsedInSyn" Val="true"/>
                     <Attr Name="UsedInP&R" Val="true"/>
                     <Attr Name="BelongTo" Val="design_1"/>
@@ -689,6 +690,26 @@
                 </FileInfo>
             </File>
         </VHDL>
+        <System_Verilog>
+            <File Path="al_ip/ChipWatcher_0/RTL/ChipWatcher_20a9eff6cecc.sv">
+                <FileInfo>
+                    <Attr Name="AutoExcluded" Val="true"/>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="83"/>
+                </FileInfo>
+            </File>
+            <File Path="al_ip/ChipWatcher_0/ChipWatcher_0.sv">
+                <FileInfo>
+                    <Attr Name="AutoExcluded" Val="true"/>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="84"/>
+                </FileInfo>
+            </File>
+        </System_Verilog>
         <ADC_FILE>
             <File Path="m2_pin.adc">
                 <FileInfo>
