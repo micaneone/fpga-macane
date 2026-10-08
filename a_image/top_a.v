@@ -51,6 +51,10 @@
     )(
         // ---------------- 时钟复位 ----------------
         input         sys_clk,          // 50 MHz
+        // ★★ 2026-10-08【集成临时改动 · 提速到 25 MHz】：SD 读移位器用的时钟。
+        //   顶层给 PLL_0 的 clk_par = 100 MHz ⇒ SCLK = 100/4 = 25 MHz（原来 12.5 MHz）。
+        //   ★ 只给【图像链】用；音频链仍接 sys_clk（行为不变）。
+        input         clk_spi,          // 100 MHz
         input         sys_rst_n,
 
         // ---------------- SD 卡引脚（内部二选一后接出去）----------------
@@ -224,6 +228,7 @@
         //======================================================================
         bmp_analyze u_bmp_analyze (
             .sys_clk    (sys_clk),
+            .clk_spi    (clk_spi),           // ★ 集成临时改动：图像链 SD 读到 25 MHz
             .sys_rst_n  (sys_rst_n),
             .spi_miso   (spi_miso),          // ★ 广播（输入）
             .spi_mosi   (bmp_mosi),          // ★ 不直接接引脚
@@ -321,6 +326,7 @@
             .TARGET_EXT ({"W","A","V"})
         ) u_wav_analyze (
             .sys_clk      (sys_clk),
+            .clk_spi      (sys_clk),         // ★ 音频链暂不提速（= 原来的行为）
             .sys_rst_n    (sys_rst_n),
 
             .spi_miso     (spi_miso),        // ★ 广播（输入）

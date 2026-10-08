@@ -2,6 +2,9 @@
       parameter [23:0] TARGET_EXT = {"B","M","P"}
   )(
       input             sys_clk,
+      // ★★ 2026-10-08【集成临时改动 · 提速到 25 MHz】：读移位器时钟，
+      //   透传给 sd_top。给 100 MHz ⇒ SCLK = 25 MHz；给 sys_clk = 原来的 12.5 MHz。
+      input             clk_spi,
       input             sys_rst_n,
       // ---- SD 卡物理引脚（透传给内部的 sd_top）----
       input             spi_miso,
@@ -367,6 +370,7 @@
       //======================================================================
       sd_top u_sd_top (
           .sys_clk   (sys_clk),
+          .clk_spi   (clk_spi),          // ★ 集成临时改动：读移位器时钟（给 100 MHz ⇒ 25 MHz）
           .sys_rst_n (sys_rst_n),
 
           .spi_miso  (spi_miso),

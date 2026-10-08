@@ -653,6 +653,12 @@ module top_m2 #(
 
     top_a #(.SLOT_NUM(2)) u_a (
         .sys_clk(clk), .sys_rst_n(sys_rst_n),
+        // ★★ 2026-10-08【集成临时改动 · SD 提速到 25 MHz】：SD 读移位器用 100 MHz。
+        //   原来是接在 50 MHz 晶振上（4 相拍 ⇒ SCLK = 12.5 MHz），
+        //   换成 PLL_0 的 clk_par（100 MHz）后 SCLK = 100/4 = **25 MHz**（规格内上限）。
+        //   ★ 只有"图像链"的读走这根；音频链仍用 50 MHz（见 top_a 里的注释）。
+        //   ★ 要回退：把这一行改成 `.clk_spi(clk)` 即可（行为与改动前逐位相同）。
+        .clk_spi(clk_par),
         .spi_miso(sd_miso), .spi_mosi(sd_mosi),
         .spi_clk(sd_dclk), .spi_cs(sd_ncs),
         // ★★ 2026-10-05：start / skip / sd_to_wav / sfx_base 现在要二选一 ——

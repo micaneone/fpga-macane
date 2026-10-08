@@ -1,5 +1,7 @@
   module bmp_analyze(
       input         sys_clk,
+      // ★★ 2026-10-08【集成临时改动 · 提速到 25 MHz】：读移位器时钟（透传给 find_bmp）
+      input         clk_spi,
       input         sys_rst_n,
 
       // ---- SD 卡引脚（透传给内部 find_bmp）----
@@ -365,6 +367,7 @@
 
       find_bmp u_find_bmp (
           .sys_clk    (sys_clk),
+          .clk_spi    (clk_spi),        // ★ 集成临时改动：100 MHz ⇒ SD 读 25 MHz
           .sys_rst_n  (sys_rst_n),
 
           .spi_miso   (spi_miso),

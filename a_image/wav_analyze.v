@@ -44,6 +44,10 @@
       parameter integer BITS_REQ = 16
   )(
       input         sys_clk,
+      // ★★ 2026-10-08【集成临时改动 · 提速到 25 MHz】：读移位器时钟（透传给 find_bmp）。
+      //   ★ 音频这条链暂时【仍给 sys_clk】⇒ 行为与改动前逐位相同（只有 288 KB、0.19 s，
+      //     不值得为它多担一次风险）。要一起提速，只要在 top_a 把这里改成 clk_spi 即可。
+      input         clk_spi,
       input         sys_rst_n,
 
       // ---- SD 卡引脚（透传给内部 find_bmp）----
@@ -479,6 +483,7 @@
           .TARGET_EXT (TARGET_EXT)
       ) u_find_bmp (
           .sys_clk    (sys_clk),
+          .clk_spi    (clk_spi),        // ★ 集成临时改动：音频链暂仍接 sys_clk（见端口注释）
           .sys_rst_n  (sys_rst_n),
 
           .spi_miso   (spi_miso),
