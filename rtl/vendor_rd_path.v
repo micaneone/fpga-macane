@@ -41,6 +41,12 @@ module vendor_rd_path #(
     input  wire        sdr_init_done,
     input  wire        sdr_init_ref_vld,
     input  wire        sdr_busy,
+    // ★★★ 2026-10-08【最小实验：把原厂的读写仲裁接上】（见 规划\B轨待改清单.md §22）
+    //   写引擎的忙标志（frame_fifo_write 的 O_wr_busy = 突发中 / 马上要突发）。
+    //   官方读控制器本来就有这个输入：`S_CHECK_FIFO` 里
+    //   `wrusedw < FIFO_DEPTH-BURST_SIZE && ~App_wr_busy` —— **写侧在突发时，读不发起突发**。
+    //   我们以前喂 1'b0（"读写不重叠靠顶层装载期间禁读保证"），等于关掉了原厂仲裁。
+    input  wire        wr_busy,
 
     // ============================================================
     //  一、SDRAM 读口（独占）
@@ -97,7 +103,10 @@ module vendor_rd_path #(
         .Sdr_init_ref_vld (sdr_init_ref_vld),
         .Sdr_busy         (sdr_busy),
         .Sdr_rd_en        (Sdr_rd_en),
-        .App_wr_busy      (1'b0),               // 读写不重叠由顶层的"装载期间禁读"门保证
+        // ★★★ 2026-10-08：原来是 1'b0（= "写侧永远不忙"）。现在接写引擎的 O_wr_busy
+        //   ⇒ 恢复原厂的**突发级互锁**：写突发期间，读控制器不发起读突发（在 S_CHECK_FIFO 等）。
+        //   两边 FIFO（写 512 / 读 512）负责把对方的突发时间填平。
+        .App_wr_busy      (wr_busy),
         .O_rd_busy        (o_rd_busy),
         .App_rd_en        (App_rd_en),
         .App_rd_addr      (App_rd_addr),

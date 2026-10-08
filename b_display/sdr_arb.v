@@ -115,7 +115,16 @@ module sdr_arb #(
     output wire [20:0] App_rd_addr,
     input  wire        Sdr_init_done,
     input  wire        Sdr_init_ref_vld,
-    input  wire        Sdr_busy
+    input  wire        Sdr_busy,
+    // ★★★ 2026-10-08【最小实验：把原厂的读写仲裁接上】（见 规划\B轨待改清单.md §22）
+    //   读通路（官方 frame_fifo_read）的"读突发进行中"标志。原厂 frame_fifo_write
+    //   本来就有这个输入：**读侧在突发时，写引擎不进入突发**（frame_fifo_write.v
+    //   第 104 行 `into_burst = ... && ~App_rd_busy`）。我们以前一直喂 1'b0
+    //   （"我们的读口是直通，不是突发"），等于告诉写引擎"读侧永远不忙" ⇒
+    //   写突发可能在读突发中间开工 ⇒ 真重叠，这就是当年 8 版失败的配置。
+    input  wire        rd_busy,
+    // 写引擎的忙标志（= 它的 O_wr_busy，突发中或马上要突发）→ 给读通路做互锁
+    output wire        o_wr_busy
 );
 
     // ============================================================
@@ -330,6 +339,10 @@ module sdr_arb #(
     //     · write_finish = 这一段写完了
     // ============================================================
     wire        wr_ack_m, wr_finish_m, wr_busy_m;
+    // ★ 2026-10-08：写引擎自己的忙标志（突发中 / 马上要突发）引出去，给读通路做互锁
+    //   （★ 声明必须在这里——`wr_busy_m` 是下面那个例化的输出，
+    //     "先用后声明"这个工程踩过五次，见 AGENTS）
+    assign o_wr_busy = wr_busy_m;
 
     frame_fifo_write #(
         .MEM_DATA_BITS (32),
@@ -345,7 +358,10 @@ module sdr_arb #(
         .Sdr_init_done    (Sdr_init_done),
         .Sdr_init_ref_vld (Sdr_init_ref_vld),
         .Sdr_busy         (Sdr_busy),
-        .App_rd_busy      (1'b0),       // 我们的读口是直通，不是突发
+        // ★★★ 2026-10-08：原来是 1'b0（= "读侧永远不忙"）。现在接上读通路的
+        //   `o_rd_busy`（官方读控制器"读突发进行中"）⇒ 恢复原厂的**突发级互锁**：
+        //   读在突发时，写引擎**不进入**突发（它会在 S_CHECK_FIFO 里等着）。
+        .App_rd_busy      (rd_busy),
         .O_wr_busy        (wr_busy_m),
         .App_wr_en        (App_wr_en),
         .App_wr_addr      (App_wr_addr),

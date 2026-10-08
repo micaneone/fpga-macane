@@ -44,11 +44,22 @@
 #           ★ A 的段长度在【字段 23/24】里（a_wr_len 的低 16 + 高 5），别在这里找。
 #           ★ 用法：25 的低 16 位应当等于 字段 11（A 自己推的字数）；
 #             27 只要不是 0，就说明读写真的同拍过。
-#    29     SDRAM sticky bitmap (see _check_busy.py)
+#    29     ★★ 2026-10-08: rd_defer_max = 显示读请求"举着但没被授权"的**最长连续拍数**
+#             (原为 10-01 那次 SDRAM busy/refresh 实验的 sticky 位图，实验早结束)
+#             判读：0~10 拍 = 正常（等官方控制器 ack 的握手）；几百拍 = 被写突发挡过。
+#             ★ 配合字段 30 的 bit8/bit9 看"原厂读写仲裁到底有没有生效"。
 #    30..32 ★★ 2026-10-05: AUDIO DATA SELF-CHECK (was the 10-01 SDRAM-busy experiment):
 #           30 = words this playback has pulled out of SDRAM (expect 72000 = 0x11940)
 #           31 = low 16 of the 32-bit running SUM of those words
 #           32 = high 16 of that sum
+#
+#  ★★★ 2026-10-08 改写：字段 30 现在是【读通路位图 + 读写仲裁探针】（位图 sticky，一旦置起就保持）：
+#           bit0 行缓冲块请求 / bit1 过闸门 / bit2 仲裁授权 / bit3 转发给官方控制器 /
+#           bit4 官方受理 / bit5 真的发过 App_rd_en / bit6 行缓冲 o_want 到过 / bit7 读口锁到过
+#           bit8 ★ 读忙(O_rd_busy) 与 写忙(O_wr_busy) **同拍都高**过（该互斥，同拍高=互锁没拦住）
+#           bit9 ★ 显示读请求被推迟超过 200 拍过（≈1.6 µs；有它=写突发确实挡过显示）
+#        字段 31 = 本次播放收了多少音频字（期望 1940）
+#        字段 32 = 那些字的 32 位和的低 16 位（期望 4411）
 #           Compare (30, 31, 32) with the same numbers computed from SFX0.WAV on the PC:
 #           identical => the audio data read back from SDRAM is word-for-word correct
 #           (=> any remaining hiss is NOT data corruption). Different => gives the error rate.

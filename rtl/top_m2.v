@@ -797,10 +797,10 @@ module top_m2 #(
     //   ⇒ 已回退成恒放行。要做节流只能在【上层按块调度】做，不能在逐拍请求上做。
     wire   mem_rd_ok  = 1'b1;                           // 握手恒放行
     wire   rd_allowed = disp_rd_en_g;
-    // ★★ 这一档装载期间屏上是米白（读被整段掐掉）→ 特效必须**从米白那一端**开始划，
-    //    否则装载一结束读口放开、旧图被读回来，"从旧图开始划"就会先闪一下旧图
-    //    （2026-10-04 上板现象，用户报的）。
-    assign tr_from_white = 1'b1;
+    // ★★ 老档：装载期间屏上是米白（读被整段掐掉）→ 特效必须**从米白那一端**开始划。
+    // ★★★ 2026-10-08【最小实验】装载期间**不再禁读**（上一条已经改掉），屏上一直是**旧图**
+    //   ⇒ 特效必须**从旧图那一端**开始划（= 0），否则会先闪一下米白。
+    assign tr_from_white = 1'b0;
 `endif
 
 
@@ -892,6 +892,11 @@ module top_m2 #(
         else        begin oh1 <= occ_hi_m; oh2 <= oh1; end
     end
 
+    // ★★★ 2026-10-08【最小实验】读写两边的忙标志（互相接起来 = 恢复原厂仲裁）
+    //   ★ 声明必须放在下面两个例化之前（这个工程踩过五次"先用后声明"）
+    wire        rd_busy_w;                 // 读通路：读突发进行中（vendor_rd_path.o_rd_busy）
+    wire        wr_busy_w;                 // 写引擎：突发中/马上突发（sdr_arb.o_wr_busy）
+
     sdr_arb u_arb (
         .clk_ctl(clk), .rst_ctl_n(sys_rst_n),
         .a_wr_req(wr_req_m), .a_wr_base(wr_base_m), .a_wr_len(wr_len_m),
@@ -903,6 +908,9 @@ module top_m2 #(
         .o_wr_burst(wr_burst), .o_wr_guard(wr_guard),
         .o_occ_hi(occ_hi_w), .o_occ_pre(occ_pre_w),
         .o_wr_cnt(sdr_wr_cnt),
+        // ★★★ 2026-10-08 最小实验：把原厂的读写仲裁接上（见《B轨待改清单》§22）
+        .rd_busy(rd_busy_w),            // ← 读通路：读突发进行中
+        .o_wr_busy(wr_busy_w),          // → 读通路：写侧忙（突发中/马上突发）
         // ★ 存储本体挪到顶层了：App 接口引出去，顶层接 sdram
         .App_wr_en(sdr_wr_en), .App_wr_addr(sdr_wr_addr),
         .App_wr_dm(sdr_wr_dm), .App_wr_din(sdr_wr_din),
@@ -938,6 +946,7 @@ module top_m2 #(
         .sdr_init_done    (sdr_init_done),
         .sdr_init_ref_vld (sdr_init_ref_vld),
         .sdr_busy         (sdr_busy),
+        .wr_busy          (wr_busy_w),      // ★ 原厂互锁：写侧忙 ⇒ 读不发突发
         // 读口（独占 SDRAM）
         .App_rd_en        (sdr_rd_en),
         .App_rd_addr      (sdr_rd_addr),
@@ -959,6 +968,7 @@ module top_m2 #(
         .o_rd_en_cnt      (vrd_rd_en_cnt),
         .o_fifo_seen      (vrd_fifo_seen)
     );
+    assign rd_busy_w = vrd_busy;            // 给写引擎看（同一根线上游）
 
     blk_rd_arb u_blk (
         .clk_mem        (clk_sdr), .rst_mem_n(sys_rst_n),
@@ -989,7 +999,14 @@ module top_m2 #(
     //     bit4 = 官方控制器受理（read_req_ack）过
     //     bit5 = 官方控制器真的发过 App_rd_en（= 驱动 SDRAM 的读使能，就是 sdr_rd_en）
     //   ★ 判读：从 bit0 往上看，**第一个还是 0 的那一位就是断点**。
+    //  ★★★ 2026-10-08【最小实验】再加两位，专看"原厂读写仲裁到底有没有生效"：
+    //     bit8 = 读忙(O_rd_busy) 和 写忙(O_wr_busy) **同拍都高**过（sticky）
+    //            两者本来就该互斥，同拍高说明互锁没拦住 ⇒ 会看到读写命令撞车
+    //     bit9 = 显示读请求**被推迟超过 200 拍**过（sticky；200 拍 ≈ 1.6 µs）
+    //            有它 = 写突发确实把显示挡住过（配合字段 29 看挡得最久多少拍）
     // ============================================================
+    // ★ 显示读请求被推迟的拍数（字段 29 报最大值）——★ 声明必须在下面两个 always 之前
+    reg [15:0] rd_defer_cnt, rd_defer_max;
     reg [15:0] dbg_chain;
     always @(posedge clk_sdr or negedge rst_n) begin
         if (!rst_n) dbg_chain <= 16'd0;
@@ -1002,7 +1019,27 @@ module top_m2 #(
             if (sdr_rd_en)     dbg_chain[5] <= 1'b1;
             if (dbg_want_seen) dbg_chain[6] <= 1'b1;
             if (dbg_lock_seen) dbg_chain[7] <= 1'b1;
+            if (rd_busy_w & wr_busy_w)          dbg_chain[8] <= 1'b1;
+            if (rd_defer_cnt > 16'd200)         dbg_chain[9] <= 1'b1;
         end
+    end
+
+    // ★★★ 2026-10-08【最小实验】探针（串口字段 29）：**显示读请求被推迟的最大拍数**
+    //   `d_blk_req` 一直举着（拿到第一个字才撤），`blk_d_gnt` 是仲裁器授权 ——
+    //   两者之间"举着但没授权"的最长连续拍数，就是"写突发把显示挡了多久"。
+    //   ★ 基线（没有写突发时）大约 5~10 拍（等官方控制器的 ack 握手）。
+    //   ★ 判读：一次 256 字写突发 ≈ 250 拍以上；只要它 < 一行的时间（3300 拍）
+    //     且图不花，就说明"块级交替"是能用的。
+    always @(posedge clk_sdr or negedge rst_n) begin
+        if (!rst_n) begin
+            rd_defer_cnt <= 16'd0;
+            rd_defer_max <= 16'd0;
+        end
+        else if (d_blk_req && ~blk_d_gnt) begin
+            if (rd_defer_cnt != 16'hFFFF) rd_defer_cnt <= rd_defer_cnt + 16'd1;
+            if (rd_defer_cnt > rd_defer_max) rd_defer_max <= rd_defer_cnt;
+        end
+        else rd_defer_cnt <= 16'd0;
     end
 
     // ============================================================
@@ -1733,7 +1770,11 @@ module top_m2 #(
         // ★★ 2026-10-04：字段 25..28 从 M1 时代的扫描字 px4..px7 改成【写侧镜像】：
         //    25 = 引擎写字拍数(低16) / 26 = 突发次数 / 27 = 读写同拍拍数 / 28 = A 的段长度(低5)
         // ★★ 2026-10-01 实验一：SDRAM 忙 / 刷新 与写使能
-        .sb_flags(dbg_busy_flags),
+        // ★★★ 2026-10-08【最小实验】：字段 29 从"10-01 那次 SDRAM 忙/刷新实验位图"
+        //   改成 **显示读请求被推迟的最大拍数**（`rd_defer_max`）——
+        //   那次实验的结论早就有了（那两根线的问题被否掉），现在这一格更有用。
+        //   判读：0~10 拍 = 一切正常；几百拍 = 被写突发挡过（配合字段 30 的 bit9）。
+        .sb_flags(rd_defer_max),
         // ★★ 2026-10-06：字段 12 的 bit1 从"tag 队列脱钩过"改成
         //   **音频块级读被看门狗掐断过**（tag 机制整条删掉了，这一位留给音频自检）。
         .tag_bad(aud_blk_stall),
@@ -1826,7 +1867,12 @@ module top_m2 #(
         else if (abusy_cnt < 34'd15_000_000_000) abusy_cnt <= abusy_cnt + 34'd1;
     end
 
-    assign disp_rd_en_g = (stwr_busy | abusy_block | ~sdr_ready | rd_mute) ? 1'b0 : disp_rd_en;
+    // ★★★ 2026-10-08【最小实验】把 `abusy_block` 从这道闸门里去掉：
+    //   以前"装载期间整段禁读"（屏上米白）。现在改成**不整段禁读**，
+    //   由原厂的读写仲裁（App_rd_busy/App_wr_busy 互相接）去保证"块级交替、不重叠"。
+    //   ★ 这条老闸门留在注释里：**回退就是把它加回来**。
+    //   ★ stwr_busy（B 自测图写入）仍保留：那条路只在 bring-up 时用，别动它。
+    assign disp_rd_en_g = (stwr_busy | ~sdr_ready | rd_mute) ? 1'b0 : disp_rd_en;
 
     // ============================================================
     //  ★★★ 2026-10-06：块级读通路的收尾（放在这里，所有声明都已就位）
@@ -1837,7 +1883,10 @@ module top_m2 #(
     // ============================================================
     assign disp_rd_en   = 1'b0;
     assign disp_rd_addr = 21'd0;
-    assign disp_rd_gate = ~(stwr_busy | abusy_block | ~sdr_ready | rd_mute);
+    // ★★★ 2026-10-08【最小实验】块请求的闸门也不再看 `abusy_block`（装载期间不再禁读）。
+    //   ⇒ 装载时显示照常读**旧图**，读写由原厂仲裁做"块级交替"。
+    //   回退：把 `| abusy_block` 加回来即可（= 老的"整段禁读"档）。
+    assign disp_rd_gate = ~(stwr_busy | ~sdr_ready | rd_mute);
     assign d_blk_req    = d_blk_req_raw & disp_rd_gate;
     // ★ 音频的块请求走【同一道闸门】（装载期间一个读都不发，§6.3-1 红线）。
     assign aud_a_req_g  = aud_a_req & disp_rd_gate;
