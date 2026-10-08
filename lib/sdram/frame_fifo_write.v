@@ -98,6 +98,11 @@ reg [BURST_BITS - 1:0]				burst_cnt;
 wire								wr_burst_finish;
 
 reg App_wr_en_r;
+// ★★ 修①（采纳 A 轨 2026-10-06 交付说明 §0 / §十）：FIFO 清零做成【定长 8 拍脉冲】，
+//    不再跟着 write_req 一直拉。见下面 S_ACK 里的说明。
+//    ★ 证据（2026-10-08 真件仿真 tb_wr_ack_window）：改之前【每笔传输丢头 2 个字】，
+//      引擎读到的第一个字就是第 2 个字；改之后 0 个字丢失、逐字全对。
+reg [3:0] aclr_cnt;
 reg App_wr_en_d0;
 
 wire into_burst;
@@ -219,6 +224,7 @@ begin
 		write_cnt <= ZERO[ADDR_BITS - 1:0];
 		fifo_aclr <= 1'b0;
 		write_req_ack <= 1'b0;
+		aclr_cnt  <= 4'd0;                      // 修①
 		//wr_burst_len <= ZERO[BURST_BITS - 1:0];
 		
 		
@@ -231,6 +237,7 @@ begin
 				if(write_req_d2 == 1'b1 && Sdr_init_done)
 				begin
 					state <= S_ACK;
+					aclr_cnt <= 4'd0;               // 修①
 				end
 				write_req_ack <= 1'b0;
 			end
@@ -241,15 +248,12 @@ begin
 				if(write_req_d2 == 1'b0)
 				begin
 					state <= S_CHECK_FIFO;
-					fifo_aclr <= 1'b0;
 					write_req_ack <= 1'b0;
 				end
 				else
 				begin
 					// 受理写请求
 					write_req_ack <= 1'b1;
-					// 清 FIFO
-					fifo_aclr <= 1'b1;
 					// 4 选 1：挑一个缓冲当基地址
 					/*
 					if(write_addr_index_d1 == 2'd0)
@@ -266,6 +270,22 @@ begin
 				end
 				// 写计数器清零
 				write_cnt <= ZERO[ADDR_BITS - 1:0];
+
+				// ★★ 修①：fifo_aclr 做成【定长 8 拍脉冲】。
+				//   原因：aclr 要等"请求撤销"才落，而请求是 A 收到 ack 才撤的，
+				//   所以 aclr 的下降沿【必然晚于 ack】；A 收到 ack 的下一拍就推第一个字，
+				//   于是每笔传输的头几个字正好落在清零窗口里被吞掉（整段前移）。
+				//   ★ sdr_arb 里那个 ACK_DELAY=64 挡不住这件事：aclr 跟着 req 走，
+				//     而 req 的撤销又取决于 ack，两个事件只会一起往后挪。
+				if(aclr_cnt < 4'd8)
+				begin
+					fifo_aclr <= 1'b1;
+					aclr_cnt  <= aclr_cnt + 4'd1;
+				end
+				else
+				begin
+					fifo_aclr <= 1'b0;
+				end
 			end
 			S_CHECK_FIFO:
 			begin
@@ -292,7 +312,9 @@ begin
 					App_wr_en_r <= 1'b0;
 					state <= S_WRITE_BURST_END;
 					// 写计数器 += 突发长度
-					write_cnt <= write_cnt + BURST_SIZE[ADDR_BITS - 1:0];
+					// ★★ 修⑤（A 轨建议）：最后一串不满 BURST_SIZE 时不能算多 ——
+					//    按实际写出去的 burst_cnt 记，别按 BURST_SIZE 记。
+					write_cnt <= write_cnt + burst_cnt;
 					// 算出下一段的起始地址
 					//wr_burst_addr <= wr_burst_addr + BURST_SIZE[ADDR_BITS - 1:0];
 				end     
