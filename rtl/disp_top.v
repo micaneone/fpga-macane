@@ -57,6 +57,9 @@ module disp_top #(
     input  wire [15:0] tr_ver,        // 描述符版本号（desc_rx.o_version）—— 变了 = 新图装好了
     // ★ 2026-10-04：特效从"米白那一端"还是"旧图那一端"开始（见 transition_ctrl.v）
     input  wire        tr_from_white,
+    // ★★★ 2026-10-08【预装 prefetch】：控制域给的"后台槽里已经是下一张了"（慢变电平）
+    //   1 ⇒ 按键时 transition_ctrl 走快速路：跳过 LOAD、直接开始划像/百叶窗/淡化
+    input  wire        tr_back_ready,
     output wire        tr_may_load,   // 电平：屏上已经全部米白，A 可以去写 SDRAM
     output wire        tr_active,     // 电平：正在转场
     output wire        tr_swap,       // 一拍脉冲：请把前台/后台对调
@@ -223,6 +226,7 @@ module disp_top #(
     transition_ctrl u_trc (
         .clk_pix(clk_pix), .rst_pix_n(rst_pix_n), .vs(vs),
         .req(tr_req), .fx_sel(tr_fx), .ver(tr_ver), .from_white(tr_from_white),
+        .back_ready(tr_back_ready),
         .mix_mode(tr_mix_mode), .white_a(tr_wa), .white_b(tr_wb), .prog(tr_prog),
         .may_load(tr_may_load), .swap(tr_swap), .active(tr_active),
         .show_back(tr_show_back)

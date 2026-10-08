@@ -21,6 +21,20 @@
 //    ★ 槽号在**发起装载那一拍**和 a_skip / a_img_no 一起寄存 ——
 //      否则 next_no 已经自增，装载中途槽号会跳。
 //    （显示那边要知道"该显示哪个槽"：top_m2 里改成取 img_no 更大的那个有效槽。）
+//
+//  ★★★ 2026-10-08【预装 prefetch】：让按键"只翻前台"。
+//    问题：按键到看见新图 = 装载(0.3~1.8s) + 转场(0.27s)，前一段屏上一直是旧图，
+//          用户感知到的"按下去没反应"就是它。
+//    做法：**在 IDLE 期间就把"下一张"偷偷装进后台槽**（不翻 req_tgl、不转场）。
+//          等用户真按键时后台槽里已经是新图 ⇒ 像素域的 transition_ctrl 走"快速路"
+//          跳过 LOAD、直接进 FX ⇒ 转场立刻开始。
+//    ★ 纯加法：后台没就绪（手快 / 上电第一张）就走**原来的 LOAD 老路**，
+//      最坏情况 = 今天的 RC1。
+//    ★ 回退：把 `pf_go` 接 0（或 `pf_armed` 恒 0）就回到 RC1 行为。
+//    ★ 三个必须处理的竞态（见 规划\B轨待改清单.md §23.4）：
+//      ① 预装的 a_start 和音频自检的 aud_load_pulse 撞拍 → `pf_go` 挡住；
+//      ② swap 之后 a_slot_use 还有两拍是旧值 → `pf_settle` + `need_load` 挡住；
+//      ③ 上电前台槽是空的（valid=0）→ `pf_armed` 挡住。
 // ============================================================
 `timescale 1ns / 1ps
 
@@ -65,7 +79,13 @@ module stub_ctrl #(
     output wire [2:0]  a_use_slot,
     output wire [20:0] a_slot_base,
     output reg  [7:0]  a_img_no,       // 图片序号（写进描述符）
-    output reg         soft_rst        // 1 = 请全设计软复位
+    output reg         soft_rst,       // 1 = 请全设计软复位
+
+    // ---- ★★★ 2026-10-08【预装 prefetch】新增四根 ----
+    input  wire        pf_go,          // ← 顶层：允许预装（音频自检做完 / 音频关掉）
+    input  wire        a_load_done,    // ← 顶层：A 装完一整张图（单拍）
+    output wire        pf_ready_o,     // → 顶层：后台槽已装好"下一张"（电平）
+    output wire        req_accept_o    // → 顶层：本次请求被受理（单拍，音效挂它）
 );
 
     // ============================================================
@@ -116,6 +136,41 @@ module stub_ctrl #(
     reg [7:0]  next_no;               // 下一张要装的序号（0 起）
     reg        req_pend;              // ★ 已经请求了转场、正等 may_load
 
+    // ============================================================
+    //  ★★★ 2026-10-08【预装 prefetch】新增状态
+    // ------------------------------------------------------------
+    //   pf_ready      后台槽里已经装好"下一张"（预装只提前一张）
+    //   load_inflight 已发 a_start、还没等到 a_load_done
+    //   need_load     本次**已受理**的请求还需要装吗（NO 就是走快速路）
+    //   pf_armed      受理过一次请求之后才允许预装（挡住上电那一次，竞态 ③）
+    //   pf_settle     转场结束后再等这么多拍才允许预装（竞态 ②）
+    //   req_accept / tr_done  给顶层的那一拍脉冲
+    // ============================================================
+    reg        pf_ready;
+    reg        load_inflight;
+    reg        need_load;
+    reg        pf_armed;
+    reg [15:0] pf_settle;
+    reg        req_accept;
+    reg        tr_active_d;
+
+    // 转场刚走完的那一拍（tr_active 是顶层给的 ac2，控制域）
+    wire tr_done = tr_active_d & ~tr_active;
+    // 64 拍 @50MHz = 1.28 µs：够像素域的 fs1/fs2 把新的 a_slot_use 交过来
+    localparam [15:0] PF_SETTLE = 16'd64;
+
+    // ★ 受理请求的那一拍（自动 / k1_press 共用；原代码是同一个外闸门包住的两个分支）
+    //   ★ 比原来多一个 `!tr_done`：转场刚走完那一拍**不受理**新请求。
+    //     为什么（别删）：swap 之后像素域已经回 IDLE、能受理 req，而控制域这边的
+    //     fs2（a_slot_use）刚好在这一拍才翻过来 —— 若同拍受理，`need_load` 会按
+    //     旧的 pf_ready 算成 0（= 不装），可后台槽其实已经换成旧图了 ⇒
+    //     屏上会划一次"回到上一张"。多挡这一拍就没有这个窗口。
+    //     （代价：恰好落在这一拍上的按键被丢掉 —— 和今天"转场期间按键被忽略"
+    //       完全一致，本来就是这样。）
+    wire req_take = sd_ready && !tr_active && !tr_done && !req_pend && !hold &&
+                    ((AUTO_START && !auto_fired && (auto_cnt >= AUTO_TICKS[31:0]))
+                     || k1_press);
+
     always @(posedge clk or negedge ctl_rst_n) begin
         if (!ctl_rst_n) begin
             auto_cnt   <= 32'd0;
@@ -127,9 +182,18 @@ module stub_ctrl #(
             req_pend   <= 1'b0;
             req_tgl    <= 1'b0;
             fx_sel     <= 2'd0;
+            pf_ready      <= 1'b0;
+            load_inflight <= 1'b0;
+            need_load     <= 1'b0;
+            pf_armed      <= 1'b0;
+            pf_settle     <= 16'd0;
+            req_accept    <= 1'b0;
+            tr_active_d   <= 1'b0;
         end
         else begin
-            a_start <= 1'b0;                       // 默认不给脉冲
+            a_start    <= 1'b0;                    // 默认不给脉冲
+            req_accept <= 1'b0;                    // 默认不给脉冲
+            tr_active_d <= tr_active;
 
             // ---- 上电自动装第一张 ----
             if (!sd_ready) begin
@@ -148,7 +212,15 @@ module stub_ctrl #(
             //     ★ 转场进行中、或上一次请求还没被受理（req_pend）时不重复请求 ——
             //       连按 key3 不会插队，也不会一次按出两场转场。
             // ============================================================
-            if (sd_ready && !tr_active && !req_pend && !hold) begin
+            if (req_take) begin
+                // ★★★ 预装：这一拍把"本次请求还需要装吗"定下来 ——
+                //   后台槽已经装好了（pf_ready）或正在装（load_inflight）⇒ 不用装，
+                //   像素域那边会走快速路直接进 FX。
+                need_load <= ~(pf_ready | load_inflight);
+                // ★ 预装的门栓：受理过一次请求之后才允许预装（竞态 ③）
+                pf_armed  <= 1'b1;
+                // ★ 给顶层的一拍脉冲：音效挂它（按键那一下响，不是预装那一刻响）
+                req_accept <= 1'b1;
                 if (AUTO_START && !auto_fired && (auto_cnt >= AUTO_TICKS[31:0])) begin
                     req_pend   <= 1'b1;
                     req_tgl    <= ~req_tgl;
@@ -166,14 +238,56 @@ module stub_ctrl #(
 
             // ============================================================
             //  ② 真的开始装载 —— 必须等转场说"屏上已经全米白"
+            //     ★ 预装加了 `need_load`：快速路（后台已就绪）这一拍不装，
+            //       否则会把**刚预装好的后台槽重装一遍**，而转场已经开始了
+            //       ⇒ 屏上出现半张图（竞态 ②）。
             // ============================================================
-            if (may_load && req_pend && !a_busy && !hold) begin
+            if (may_load && req_pend && need_load && !a_busy && !hold) begin
                 a_start  <= 1'b1;
                 a_skip   <= next_no[3:0];
                 a_img_no <= next_no + 8'd1;
                 next_no  <= next_no + 8'd1;
                 req_pend <= 1'b0;
+                need_load <= 1'b0;
+                load_inflight <= 1'b1;                 // ★ 预装：记下"有一张在路上"
             end
+
+            // ============================================================
+            //  ③ ★★★【预装】IDLE 期间把"下一张"偷偷装进后台槽
+            //     · 和 ② 天然互斥（② 要 req_pend，③ 要 !req_pend）
+            //     · pf_go 挡住"和音频自检的 aud_load_pulse 撞拍"（竞态 ①）
+            //     · !tr_active + pf_settle 挡住 swap 之后那两拍（竞态 ②）
+            //     · pf_armed 挡住上电那一次（竞态 ③）
+            //     · 不翻 req_tgl、不发起转场 —— 屏上什么都不变，只是后台槽换人了
+            // ============================================================
+            if (pf_armed && pf_go && !pf_ready && !load_inflight && !req_pend
+                && !a_busy && !hold && !tr_active && (pf_settle == 16'd0)) begin
+                a_start       <= 1'b1;
+                a_skip        <= next_no[3:0];
+                a_img_no      <= next_no + 8'd1;
+                next_no       <= next_no + 8'd1;
+                load_inflight <= 1'b1;
+            end
+
+            // ============================================================
+            //  ④ 收尾（每拍）
+            //     · A 装完一张（不管是谁让它装的）⇒ 后台槽里就是"下一张"了
+            //     · 转场走完 ⇒ 前台/后台刚对调过，后台槽里又变回旧图 ⇒ pf_ready 清了；
+            //       同时把这次换图彻底收尾（req_pend 归零），否则快速路下没人清
+            //       req_pend，第 151 行那个闸门会永久关死 ⇒ 按一次之后就再也按不动。
+            //     ★ 顺序要紧：这两段在 ① ② ③ 之后，靠"后写的赢"覆盖同拍的情况。
+            // ============================================================
+            if (a_load_done) begin
+                load_inflight <= 1'b0;
+                pf_ready      <= 1'b1;
+            end
+            if (tr_done) begin
+                pf_ready      <= 1'b0;
+                req_pend      <= 1'b0;
+                need_load     <= 1'b0;
+            end
+            pf_settle <= tr_done              ? PF_SETTLE :
+                         (pf_settle != 16'd0) ? (pf_settle - 16'd1) : 16'd0;
         end
     end
 
@@ -184,5 +298,9 @@ module stub_ctrl #(
     // ★ 探针：把消抖后的 KEY3 脉冲引出去（串口报告数它 → 判断"键到底有没有被看到"）
     assign k1_press_o = k1_press;
     assign req_pend_o = req_pend;
+
+    // ★★★ 2026-10-08【预装】给顶层
+    assign pf_ready_o   = pf_ready;
+    assign req_accept_o = req_accept;
 
 endmodule

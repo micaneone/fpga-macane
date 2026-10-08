@@ -566,6 +566,35 @@ module top_m2 #(
     end
     assign tr_fx = fx2;
 
+    // ============================================================
+    //  ★★★ 2026-10-08【预装 prefetch】控制桩 ↔ 转场 的两根新线
+    // ------------------------------------------------------------
+    //   pf_ready_w   : 控制域。后台槽里已经装好"下一张"（长时间稳定的电平）
+    //   req_accept_w : 控制域。本次换图请求被受理（★ 单拍）—— 音效挂它
+    //   ★ 需求：按键时**转场立刻开始**（屏上不再有"按下去 0.3~1.8 秒没反应"）。
+    //     顶层在 IDLE 期间就指挥 A 把下一张装进后台槽（见 stub_ctrl 头注释）。
+    //   ★ 三处连线，全在这一段里做完（声明必须先于使用 —— 下面 569 行就例化它）：
+    //     ① pf_go：允许预装的门。★ 竞态①（撞上音效自检）：顶层
+    //        `.start(a_start_use | aud_load_pulse)` + `.skip(aud_want ? 0 : a_skip)`
+    //        ⇒ 预装的 a_start 若和 aud_load_pulse 同拍，会被当成"装音效"，
+    //        图的脉冲丢了 ⇒ stub_ctrl 等的 a_load_done 永远不来 ⇒ 卡死。
+    //        所以音频自检没做完（也没失败）之前，一个预装都不许发。
+    //     ② pf_ready → 像素域：慢变电平，两位同步器就够（★ 单拍脉冲绝不能这么跨）。
+    //        这就是给 transition_ctrl 的 `back_ready`。
+    //     ③ 例化里带上的 .a_load_done / .pf_ready_o / .req_accept_o。
+    // ============================================================
+    localparam AUD_PF_GO = AUDIO_OFF;             // 音频整个关掉时直接允许预装
+    wire       pf_go_w   = AUD_PF_GO | aud_loaded | aud_fail;
+    wire       pf_ready_w;
+    wire       req_accept_w;
+
+    reg pfr1, pfr2;                               // pf_ready → 像素域（两位同步器）
+    always @(posedge clk_pix or negedge disp_rst_n) begin
+        if (!disp_rst_n) begin pfr1 <= 1'b0; pfr2 <= 1'b0; end
+        else             begin pfr1 <= pf_ready_w; pfr2 <= pfr1; end
+    end
+    wire tr_back_ready = pfr2;                    // → disp_top → transition_ctrl
+
     stub_ctrl #(
         .CLK_HZ(50_000_000), .AUTO_DELAY_MS(100), .RST_HOLD_MS(5),
         .SLOT_BASE(0), .AUTO_START(CTL_AUTO_START)
@@ -580,7 +609,10 @@ module top_m2 #(
         .a_use_slot(a_use_slot), .a_slot_base(a_slot_base),
         .a_img_no(a_img_no), .soft_rst(soft_rst),
         .req_tgl(req_tgl), .fx_sel(fx_sel_ctl),
-        .k1_press_o(k1_press_w), .req_pend_o(req_pend_w)
+        .k1_press_o(k1_press_w), .req_pend_o(req_pend_w),
+        // ★★★ 2026-10-08【预装】四根新线
+        .pf_go(pf_go_w), .a_load_done(a_load_done),
+        .pf_ready_o(pf_ready_w), .req_accept_o(req_accept_w)
     );
 
     // ============================================================
@@ -1400,6 +1432,8 @@ module top_m2 #(
         .step_b_q16(z_b_step), .off_ub_q16(z_b_offu), .off_vb_q16(z_b_offv),
         .tr_req(tr_req), .tr_fx(tr_fx), .tr_ver(desc_version),
         .tr_from_white(tr_from_white),
+        // ★★★ 2026-10-08【预装】：后台槽已就绪 ⇒ 按键时转场走快速路（跳过 LOAD）
+        .tr_back_ready(tr_back_ready),
         .tr_may_load(tr_may_load), .tr_active(tr_active), .tr_swap(tr_swap),
         .tr_show_back(tr_show_back),
         .win_on(win_on),
@@ -1556,9 +1590,16 @@ module top_m2 #(
         end
         else begin
             aud_load_pulse <= 1'b0;
-            // ---- 每装完一张图 → 请播一次（音效没装进来时就别播了，免得放垃圾）----
-            if (a_load_done && aud_loaded) aud_play_req <= 1'b1;
-            else                           aud_play_req <= 1'b0;
+            // ---- 每次【受理换图请求】→ 请播一次（音效没装进来时就别播了，免得放垃圾）----
+            // ★★★ 2026-10-08【预装】：原来是挂 `a_load_done`（= 图装完那一刻响）。
+            //   预装之后 a_load_done 会在【IDLE 期间偷偷预装】时就来一次 ⇒ 若还挂它，
+            //   音效会在"没人按键"的时候自己响。改成挂 `req_accept_w`
+            //   （控制桩受理请求那一拍）⇒ **还是按键那一下响**，而且比原来早
+            //   0.3~1.8 秒（原来的响点被 LOAD 那段等到了图装完之后）。
+            //   上电那一次：req_accept 早于 aud_loaded ⇒ 不响；音效自己装完后
+            //   （下面 aud_st==2）照旧播一次 —— 和原来一样。
+            if (req_accept_w && aud_loaded) aud_play_req <= 1'b1;
+            else                            aud_play_req <= 1'b0;
 
             case (aud_st)
             // ---- 0：等第一张图真的出来 ----
