@@ -66,6 +66,28 @@ module disp_top #(
     // ★ 现在"该显示的是后台那张"（装载/淡入）—— 顶层拿它选缩放几何跟着谁
     output wire        tr_show_back,
 
+    // ---------------- ★★★ 2026-10-08【字幕叠加（像素流水第 ④ 级）】----------------
+    //   ★ 参数是【端口】不是常数：现在由顶层给暂定值，
+    //     以后 C 轨的窗口表（`WIN_SUB` 那一条）直接接上来，本模块不用改。
+    input  wire        sub_on,        // 1 = 这条字幕要显示（SDRAM 里已经有了）
+    input  wire [11:0] sub_x0,
+    input  wire [11:0] sub_y0,
+    input  wire [11:0] sub_w,         // 契约固定 800
+    input  wire [11:0] sub_h,         // 契约固定 64
+    input  wire [20:0] sub_base,      // 字幕区基址 + 条号×1600
+    input  wire [15:0] sub_ink,       // bit=1 画这个颜色（默认黑）
+    // 读口第三个客户（→ blk_rd_arb 的 s_* 那一组）
+    output wire        s_blk_req,
+    output wire [20:0] s_blk_base,
+    output wire [20:0] s_blk_len,
+    input  wire        s_blk_gnt,
+    output wire        s_blk_next,
+    input  wire        s_blk_dv,
+    input  wire [31:0] s_blk_data,
+    input  wire        s_blk_fin,
+    output wire [15:0] o_sub_row_cnt,
+    output wire        o_sub_hit,
+
     // ---------------- 窗口（来自 stub_win_table）----------------
     input  wire        win_on,
     input  wire [11:0] win_x0,
@@ -242,12 +264,35 @@ module disp_top #(
     );
 
     // ============================================================
+    //  ★★★ 2026-10-08【字幕叠加】—— 像素流水第 ④ 级
+    //    转场之后、565→888 之前。**1bpp 遮罩：bit=1 画黑（字）、bit=0 透传**。
+    //    ★ 坐标用 `o_dbg_x/o_dbg_y`：那两行注释写着"和送 HDMI 的 de_mix/px_mix
+    //      同一像素"（`x_cd/y_cd` 是早一拍的，给不了这一级用）。
+    //    ★ 它自己会多打一拍 ⇒ 下面 de/vs 和 rgb 全部改用 *_z 那一组。
+    // ============================================================
+    wire [15:0] px_z;
+    wire        de_z, vs_z;
+
+    subtitle_ovl u_sub (
+        .clk_pix(clk_pix), .rst_pix_n(rst_pix_n),
+        .de_in(de_mix), .vs_in(vs_mix),
+        .x_in(o_dbg_x), .y_in(o_dbg_y), .px_in(px_mix),
+        .px_out(px_z), .de_out(de_z), .vs_out(vs_z),
+        .sub_on(sub_on), .sub_x0(sub_x0), .sub_y0(sub_y0),
+        .sub_w(sub_w), .sub_h(sub_h), .sub_base(sub_base), .ink(sub_ink),
+        .mem_req(s_blk_req), .mem_base(s_blk_base), .mem_len(s_blk_len),
+        .mem_gnt(s_blk_gnt), .mem_next(s_blk_next),
+        .mem_dv(s_blk_dv), .mem_data(s_blk_data), .mem_fin(s_blk_fin),
+        .o_row_cnt(o_sub_row_cnt), .o_hit(o_sub_hit)
+    );
+
+    // ============================================================
     //  RGB565 → RGB888（低位补高位）
     // ============================================================
     wire [23:0] rgb888 = {
-        px_mix[15:11], px_mix[15:13],
-        px_mix[10:5],  px_mix[10:9],
-        px_mix[4:0],   px_mix[4:2]
+        px_z[15:11], px_z[15:13],
+        px_z[10:5],  px_z[10:9],
+        px_z[4:0],   px_z[4:2]
     };
 
     // ============================================================
@@ -260,8 +305,8 @@ module disp_top #(
         .I_pclk      (clk_par),
         .I_serial_clk(clk_ser),
         .I_rst       (~rst_pix_n),
-        .I_vs        (vs_mix),
-        .I_de        (de_mix),
+        .I_vs        (vs_z),           // ★ 改用字幕那一级之后的（和 rgb888 同拍）
+        .I_de        (de_z),
         .I_rgb       (rgb888),
         .O_tmds_clk_p(HDMI_CLK_P),
         .O_tmds_d0_p (HDMI_D0_P),
@@ -284,8 +329,8 @@ module disp_top #(
     // ---- 诊断引出 ----
     assign o_frame_start = frame_start;
     assign o_frame_id    = frame_id;
-    assign o_de          = de_mix;      // ★ 送给 HDMI 的那一拍（转场之后）
-    assign o_vs          = vs_mix;
-    assign o_rgb565      = px_mix;
+    assign o_de          = de_z;        // ★ 送给 HDMI 的那一拍（转场 + 字幕之后）
+    assign o_vs          = vs_z;
+    assign o_rgb565      = px_z;
 
 endmodule

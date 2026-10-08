@@ -70,7 +70,7 @@ module blk_rd_arb #(
     // ★★ 交付脉冲【合并成一个 2 位端口】：bit0 = 显示交付、bit1 = 音频交付。
     //    为什么不用两根 1 位线：TD 对"同一个 net 被两个分支驱动"很敏感
     //    （连 `assign x = sel ? a : b;` 这种都报过多驱动），合并成一根就从根上没有二选一。
-    output wire [1:0]  o_dv,
+    output wire [2:0]  o_dv,               // ★ 2026-10-08：位宽 2 → 3（bit2 = 字幕）
     output reg         d_done,             // 单拍：这个块取完了
 
     // ============================================================
@@ -84,9 +84,25 @@ module blk_rd_arb #(
     output wire [31:0] a_data,
     output reg         a_done,             // 单拍
 
+    // ============================================================
+    //  四、★ 2026-10-08【字幕申请人】—— 一次一行的 25 字短块
+    //     · 一条字幕 1600 字 = 25 字/行 × 64 行（800×64 遮罩，1bpp）
+    //     · 字幕**不是**每拍都在取：它是"下一条扫描线要用哪一行"，提前一条线取
+    //       ⇒ 一帧 64 个短块 ≈ 64×(25+握手) ≈ 2200 拍，占一帧的 0.1%
+    //     · 优先级排在**显示之后、音频之后**（谁都没有它也不急）
+    // ============================================================
+    input  wire        s_req,
+    input  wire [20:0] s_base,
+    input  wire [20:0] s_len,
+    output reg         s_gnt,
+    input  wire        s_next,
+    output wire [31:0] s_data,
+    output reg         s_done,             // 单拍
+
     // ---- 诊断 ----
     output reg  [15:0] o_blk_cnt,          // 服务过多少块（累计）
     output reg  [15:0] o_aud_blk_cnt,      // 其中多少块是音频
+    output reg  [15:0] o_sub_blk_cnt,      // 其中多少块是字幕
     output reg         o_timeout           // 1 = 看门狗掐断过（sticky）
 );
 
@@ -99,7 +115,11 @@ module blk_rd_arb #(
                      S_TAIL  = 3'd3;       // 取够了，等 read_fin 收尾（保底）
 
     reg  [2:0]  st;
-    reg         owner;                     // 0 = 显示，1 = 音频
+    // ★ 2026-10-08：owner 由 1 位扩成 2 位（第三个客户是字幕）
+    localparam [1:0] OW_DISP = 2'd0,       // 显示（最高优先级）
+                     OW_AUD  = 2'd1,       // 音频
+                     OW_SUB  = 2'd2;       // 字幕
+    reg  [1:0]  owner;
     reg  [20:0] blk_base, blk_len;
     reg  [20:0] take_cnt;                  // 这个块已经被取走多少个字
     // ★ 交付脉冲的"源"：只在主状态机里赋值一次，端口再用连续赋值分给两家
@@ -115,11 +135,18 @@ module blk_rd_arb #(
     //   数据本身【组合】引出去（`d_data = rd_data`），
     //   由 `o_dv` 的脉冲（= take_ok 打两拍）告诉申请方"这一拍有效"。
     reg         take_d1, take_d2;
-    reg         owner_d1, owner_d2;        // 跟着打两拍的所有者（dv 要和对齐）
+    reg  [1:0]  owner_d1, owner_d2;        // 跟着打两拍的所有者（dv 要和对齐）
     reg  [13:0] serv_cnt;                  // ★ 服务态看门狗计数（有字取走就清零）
 
-    wire        cur_req  = owner ? a_req  : d_req;
-    wire        cur_next = owner ? a_next : d_next;
+    // ★ 当前主人的请求 / 是否还要字（三选一；用 case 写，避免 TD 的多驱动误报）
+    reg         cur_req, cur_next;
+    always @(*) begin
+        case (owner)
+        OW_AUD:  begin cur_req = a_req;  cur_next = a_next;  end
+        OW_SUB:  begin cur_req = s_req;  cur_next = s_next;  end
+        default: begin cur_req = d_req;  cur_next = d_next;  end
+        endcase
+    end
     // ★ 取数条件：① 在服务中 ② 申请方这一拍要字 ③ 还没取够 ④ **FIFO 里确实有字**
     wire        take_ok  = (st == S_SERV) && cur_next && (take_cnt < blk_len) && rd_used_nz;
     wire        take_last = take_ok && (take_cnt + 21'd1 >= blk_len);
@@ -131,7 +158,7 @@ module blk_rd_arb #(
     always @(posedge clk_mem or negedge rst_mem_n) begin
         if (!rst_mem_n) begin
             st        <= S_IDLE;
-            owner     <= 1'b0;
+            owner     <= OW_DISP;
             rd_req    <= 1'b0;
             rd_base   <= 21'd0;
             rd_len    <= 21'd0;
@@ -140,17 +167,21 @@ module blk_rd_arb #(
             take_cnt  <= 21'd0;
             d_gnt     <= 1'b0;
             a_gnt     <= 1'b0;
+            s_gnt     <= 1'b0;
             d_done    <= 1'b0;
             a_done    <= 1'b0;
+            s_done    <= 1'b0;
             take_dv_r <= 1'b0;
             o_blk_cnt     <= 16'd0;
             o_aud_blk_cnt <= 16'd0;
+            o_sub_blk_cnt <= 16'd0;
             o_timeout     <= 1'b0;
             serv_cnt      <= 14'd0;
         end
         else begin
             d_done <= 1'b0;
             a_done <= 1'b0;
+            s_done <= 1'b0;
             take_dv_r <= take_ok;          // ★ 唯一赋值处
             // ---- 看门狗计数：这一拍取走一个字就清零，否则累加 ----
             if (take_ok)                       serv_cnt <= 14'd0;
@@ -161,9 +192,10 @@ module blk_rd_arb #(
             S_IDLE: begin
                 d_gnt <= 1'b0;
                 a_gnt <= 1'b0;
+                s_gnt <= 1'b0;
                 rd_en <= 1'b0;
                 if (d_req) begin
-                    owner    <= 1'b0;
+                    owner    <= OW_DISP;
                     blk_base <= d_base;
                     blk_len  <= d_len;
                     rd_base  <= d_base;
@@ -173,11 +205,23 @@ module blk_rd_arb #(
                     st       <= S_REQ;
                 end
                 else if (a_req) begin
-                    owner    <= 1'b1;
+                    owner    <= OW_AUD;
                     blk_base <= a_base;
                     blk_len  <= a_len;
                     rd_base  <= a_base;
                     rd_len   <= a_len;
+                    rd_req   <= 1'b1;
+                    take_cnt <= 21'd0;
+                    st       <= S_REQ;
+                end
+                // ★ 2026-10-08：字幕排在最后（显示 > 音频 > 字幕）。
+                //   它一次只借 25 个字、一帧借 64 次，让一步毫无代价。
+                else if (s_req) begin
+                    owner    <= OW_SUB;
+                    blk_base <= s_base;
+                    blk_len  <= s_len;
+                    rd_base  <= s_base;
+                    rd_len   <= s_len;
                     rd_req   <= 1'b1;
                     take_cnt <= 21'd0;
                     st       <= S_REQ;
@@ -188,8 +232,9 @@ module blk_rd_arb #(
             S_REQ: begin
                 if (rd_ack) begin
                     rd_req <= 1'b0;
-                    if (owner) a_gnt <= 1'b1;
-                    else       d_gnt <= 1'b1;
+                    if (owner == OW_AUD)      a_gnt <= 1'b1;
+                    else if (owner == OW_SUB) s_gnt <= 1'b1;
+                    else                      d_gnt <= 1'b1;
                     // ★★★ 看门狗计数**必须在这里清零**：它是"这一块已经被拿走多少拍
                     //   还没进一个字"的计数。空闲期间（行间 26 µs）它一直加到饱和，
                     //   不在这里清的话，一块刚授权就立刻超时 ⇒ 一个字都取不到
@@ -197,7 +242,10 @@ module blk_rd_arb #(
                     serv_cnt <= 14'd0;
                     st     <= S_SERV;
                     if (o_blk_cnt != 16'hFFFF)      o_blk_cnt     <= o_blk_cnt + 16'd1;
-                    if (owner && o_aud_blk_cnt != 16'hFFFF) o_aud_blk_cnt <= o_aud_blk_cnt + 16'd1;
+                    if ((owner == OW_AUD) && (o_aud_blk_cnt != 16'hFFFF))
+                        o_aud_blk_cnt <= o_aud_blk_cnt + 16'd1;
+                    if ((owner == OW_SUB) && (o_sub_blk_cnt != 16'hFFFF))
+                        o_sub_blk_cnt <= o_sub_blk_cnt + 16'd1;
                 end
             end
 
@@ -215,8 +263,9 @@ module blk_rd_arb #(
                     //   等 S_TAIL 结束撤掉授权时那个请求就**再也回不来**了。
                     //   仿真里这条一眼可见：第 1 块 64 字正确，第 2 块起
                     //   "受理 100 次、一个字都收不到"，两头看门狗轮流掐断。
-                    if (owner) a_gnt <= 1'b0;
-                    else       d_gnt <= 1'b0;
+                    if (owner == OW_AUD)      a_gnt <= 1'b0;
+                    else if (owner == OW_SUB) s_gnt <= 1'b0;
+                    else                      d_gnt <= 1'b0;
                     st <= S_TAIL;
                 end
                 // ★★★ 2026-10-06 看门狗：一直没人取字（申请方卡住 /
@@ -224,8 +273,9 @@ module blk_rd_arb #(
                 //   **绝不让显示被音频（或任何申请方）堵死**。
                 else if (serv_cnt >= SERV_MAX[13:0]) begin
                     o_timeout <= 1'b1;
-                    if (owner) a_gnt <= 1'b0;
-                    else       d_gnt <= 1'b0;
+                    if (owner == OW_AUD)      a_gnt <= 1'b0;
+                    else if (owner == OW_SUB) s_gnt <= 1'b0;
+                    else                      d_gnt <= 1'b0;
                     rd_req  <= 1'b0;
                     rd_en   <= 1'b0;
                     st      <= S_IDLE;
@@ -236,16 +286,18 @@ module blk_rd_arb #(
             S_TAIL: begin
                 rd_en <= 1'b0;
                 if (rd_fin) begin
-                    if (owner) begin a_gnt <= 1'b0; a_done <= 1'b1; end
-                    else       begin d_gnt <= 1'b0; d_done <= 1'b1; end
+                    if (owner == OW_AUD)      begin a_gnt <= 1'b0; a_done <= 1'b1; end
+                    else if (owner == OW_SUB) begin s_gnt <= 1'b0; s_done <= 1'b1; end
+                    else                      begin d_gnt <= 1'b0; d_done <= 1'b1; end
                     st <= S_IDLE;
                 end
                 // ★ 收尾也兜一个底：官方的 read_finish 只亮一拍，万一它在我们
                 //   进 S_TAIL 之前就过去了（FIFO 够深时是可能的），这里不能死等。
                 else if (serv_cnt >= SERV_MAX[13:0]) begin
                     o_timeout <= 1'b1;
-                    if (owner) a_gnt <= 1'b0;
-                    else       d_gnt <= 1'b0;
+                    if (owner == OW_AUD)      a_gnt <= 1'b0;
+                    else if (owner == OW_SUB) s_gnt <= 1'b0;
+                    else                      d_gnt <= 1'b0;
                     st <= S_IDLE;
                 end
             end
@@ -266,8 +318,8 @@ module blk_rd_arb #(
         if (!rst_mem_n) begin
             take_d1  <= 1'b0;
             take_d2  <= 1'b0;
-            owner_d1 <= 1'b0;
-            owner_d2 <= 1'b0;
+            owner_d1 <= OW_DISP;
+            owner_d2 <= OW_DISP;
         end
         else begin
             take_d1  <= take_ok;             // 第 1 拍：rd_en 发出
@@ -281,9 +333,10 @@ module blk_rd_arb #(
     // （和官方 `read_data` 的用法完全一致 —— 不需要再寄存一次）
     assign d_data = rd_data;
     assign a_data = rd_data;
+    assign s_data = rd_data;               // ★ 2026-10-08：字幕也是同一条出口
 
-    // ★★★ 交付脉冲：一根 2 位线，bit0 = 显示、bit1 = 音频。
+    // ★★★ 交付脉冲：一根 3 位线，bit0 = 显示、bit1 = 音频、bit2 = 字幕。
     //   用【打两拍】的 take_d2（= dout 真的有效那一拍），和组合引出的数据天然对齐。
-    assign o_dv = take_d2 ? (owner_d2 ? 2'b10 : 2'b01) : 2'b00;
+    assign o_dv = take_d2 ? (3'b001 << owner_d2) : 3'b000;
 
 endmodule

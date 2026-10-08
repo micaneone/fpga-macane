@@ -253,6 +253,42 @@ module top_m2 #(
     reg  [1:0]  aud_st;               // 0=等图 1=等 1 秒 2=装载中 3=做完
     reg  [25:0] aud_wait;
 
+    // ============================================================
+    //  ★★★ 2026-10-08【字幕：装载 + 叠加】—— 最小可用版
+    // ------------------------------------------------------------
+    //  两件事：
+    //   ① 装载：上电后（**等音频那条自检做完**，避免两个"自产装载"撞车）
+    //            自动装**卡里第 1 条 .SUB**：sd_mode=2 / skip=0 / sub_base=字幕区基址。
+    //   ② 叠加：disp_top 的第 ④ 级（subtitle_ovl）把遮罩叠到画面上，
+    //            **bit=1 画黑（字）、bit=0 透传**。
+    //  ★ 位置先给一个暂定值（贴底居中），但**是"顶层 -> disp_top -> 模块"的端口**，
+    //    不是常数 —— 以后 C 轨的窗口表（`WIN_SUB` 那一条）直接替掉这几个 wire 即可。
+    //  ★ 极性/尺寸全部按契约：800×64 1bpp，SDR_SUBTITLE_BASE / _STRIDE。
+    // ============================================================
+    localparam [20:0] SUB_BASE   = 21'd2085760;   // 契约 SDR_SUBTITLE_BASE
+    localparam [3:0]  SUB_SKIP   = 4'd0;          // 卡里第 1 个 .SUB（在自己的扩展名里数）
+    // 暂定位置：800×64 的字幕条贴在屏幕底部（y = 600 - 64 - 8 = 528）、横向居中
+    localparam [11:0] SUB_X0_DFLT = 12'd0;
+    localparam [11:0] SUB_Y0_DFLT = 12'd528;
+    localparam [11:0] SUB_W_DFLT  = 12'd800;      // 契约 ART_SUB_W
+    localparam [11:0] SUB_H_DFLT  = 12'd64;       // 契约 ART_SUB_H
+    localparam [15:0] SUB_INK     = 16'h0000;     // ★ bit=1 画这个颜色（黑 = 文字）
+
+    wire        a_sub_done;           // ← top_a：这一条字幕写进 SDRAM 了（单拍）
+    reg         sub_load_pulse;       // → A 的 start（单拍；sd_mode 也由它选）
+    reg         sub_loaded;           // 字幕已经在 SDRAM 里了（= 叠加的 on）
+    reg         sub_fail;             // 装载失败过（就当没有字幕，不再重试）
+    reg  [1:0]  sub_st;
+    reg  [25:0] sub_wait;
+
+    // ---- ★ 三选一：谁在发脉冲，sd_mode/skip/基址 就是谁的 ----
+    //   ★★ 用【脉冲】而不是"电平"来选：top_a 本来就是在 `start` 那一拍锁存 sd_mode 的，
+    //      而电平一旦因为失败没清干净，就会把后面的"装图"也带偏（装载中易主）。
+    //      （原来音频用 aud_want 电平选，这版一起改成脉冲 —— 行为等价，但更不容易错。）
+    wire [1:0]  a_sd_mode  = sub_load_pulse ? 2'd2 : (aud_load_pulse ? 2'd1 : 2'd0);
+    wire [20:0] a_sub_base = sub_load_pulse ? SUB_BASE : 21'd0;
+    wire [3:0]  a_sd_skip  = sub_load_pulse ? SUB_SKIP : 4'd0;
+
     // 行缓冲探针（第一次填充的请求地址/字数 + 收到的头两个字）
     wire [20:0] lb_wbase0;
     wire [11:0] lb_words0;
@@ -693,17 +729,23 @@ module top_m2 #(
         .clk_spi(clk_par),
         .spi_miso(sd_miso), .spi_mosi(sd_mosi),
         .spi_clk(sd_dclk), .spi_cs(sd_ncs),
-        // ★★ 2026-10-05：start / skip / sd_to_wav / sfx_base 现在要二选一 ——
-        //   · 平时（aud_want=0）：控制桩那套，装图（和以前一模一样）；
-        //   · 装音效时（aud_want=1）：skip=0、sfx_base=音效区基址，装那一条 WAV。
-        //   ★ sd_to_wav 由 top_a 在 start 那一拍锁存（它内部就是这么设计的），
-        //     而 aud_want 从发脉冲到装完一直不变 ⇒ 两条链不会中途易主。
-        .start(a_start_use | aud_load_pulse),
-        .skip(aud_want ? 4'd0 : a_skip), .use_slot(a_use_slot),
+        // ★★★ 2026-10-08：A 的 top_a 改成**三选一**（`sd_to_wav` 一位 → `sd_mode` 两位）——
+        //   0 = 装图（控制桩那套，和以前一模一样）
+        //   1 = 装音频（自产的音效自检）
+        //   2 = 装字幕（自产的字幕自检；卡里第 1 个 .SUB）
+        //   ★ sd_mode / skip / 基址 全部由【发脉冲的那一个】决定，而且 top_a 本来
+        //     就在 `start` 那一拍锁存 ⇒ 三条链绝不会中途易主。
+        //   ★ 三个脉冲由各自的 FSM 产生，且字幕那条**等音频做完**才动 ⇒ 不会撞。
+        .start(a_start_use | aud_load_pulse | sub_load_pulse),
+        .sd_mode(a_sd_mode),
+        .skip(a_sd_mode == 2'd2 ? SUB_SKIP : (a_sd_mode == 2'd1 ? 4'd0 : a_skip)),
+        .use_slot(a_use_slot),
         .slot_base(a_slot_base), .img_no(a_img_no),
-        .sd_to_wav(aud_want), .sfx_base(aud_want ? SFX_BASE : 21'd0),
+        .sfx_base(a_sd_mode == 2'd1 ? SFX_BASE : 21'd0),
+        .sub_base(a_sub_base),
         .busy(a_busy), .load_done(a_load_done), .desc_done(a_desc_done),
         .ready_n(a_ready_n), .fail(a_fail), .sd_ready(a_sd_ready), .led_init(),
+        .sub_done(a_sub_done),
         .a_wr_req(a_wr_req), .a_wr_base(a_wr_base), .a_wr_len(a_wr_len),
         .a_wr_ack(a_wr_ack),
         .a_wr_data(a_wr_data), .a_wr_we(a_wr_we),
@@ -969,7 +1011,18 @@ module top_m2 #(
     wire        blk_timeout;               // ★ 探针：仲裁器看门狗掐断过（sticky）
     wire        blk_d_gnt;
     wire        dbg_want_seen, dbg_lock_seen;   // ★ 探针 bit6/bit7（o_want 到过 / 锁拿到过）
-    wire [1:0]  o_blk_dv;                  // ★ bit0 = 显示交付（来自 blk_rd_arb.o_dv）
+    // ★ 2026-10-08：o_dv 由 2 位扩到 3 位 —— bit0 = 显示 / bit1 = 音频 / bit2 = 字幕
+    wire [2:0]  o_blk_dv;
+    // ---- ★★★ 2026-10-08 字幕的块级读口（top ↔ blk_rd_arb 的第三个客户）----
+    //   ★ 这一组**不过**"装载期间禁读"闸门：字幕只在图装完之后才去读，
+    //     那时闸门早就是 1 了；而过了闸门反而会在闸门为 0 时把 req 掩掉、
+    //     让 subtitle_ovl 的取数 FSM 卡在"等授权"上（得不偿失）。
+    wire        sub_blk_req;
+    wire [20:0] sub_blk_base, sub_blk_len;
+    wire        sub_blk_gnt, sub_blk_next, sub_blk_fin;
+    wire [31:0] sub_blk_data;
+    wire [15:0] sub_row_cnt;
+    wire        sub_hit;
     wire [31:0] blk_d_data;
 
     vendor_rd_path u_vrd (
@@ -1016,7 +1069,12 @@ module top_m2 #(
         // 音频口：★ 2026-10-06 起接到 top_aud 的块级音频读客户端
         .a_req          (aud_a_req_g), .a_base(aud_a_base), .a_len(aud_a_len),
         .a_gnt          (aud_a_gnt), .a_next(aud_a_next), .a_data(blk_a_data), .a_done(),
+        // ★ 字幕口（2026-10-08）：一次一行的 25 字短块，优先级排在最后
+        .s_req          (sub_blk_req), .s_base(sub_blk_base), .s_len(sub_blk_len),
+        .s_gnt          (sub_blk_gnt), .s_next(sub_blk_next),
+        .s_data         (sub_blk_data), .s_done(sub_blk_fin),
         .o_blk_cnt      (blk_fin_cnt), .o_aud_blk_cnt(blk_aud_cnt),
+        .o_sub_blk_cnt  (),
         .o_timeout      (blk_timeout)
     );
 
@@ -1436,6 +1494,15 @@ module top_m2 #(
         .tr_back_ready(tr_back_ready),
         .tr_may_load(tr_may_load), .tr_active(tr_active), .tr_swap(tr_swap),
         .tr_show_back(tr_show_back),
+        // ★★★ 2026-10-08【字幕叠加】：先给暂定位置；以后换成 C 的 WIN_SUB 那一行
+        .sub_on(sub_loaded),
+        .sub_x0(SUB_X0_DFLT), .sub_y0(SUB_Y0_DFLT),
+        .sub_w(SUB_W_DFLT), .sub_h(SUB_H_DFLT),
+        .sub_base(SUB_BASE), .sub_ink(SUB_INK),
+        .s_blk_req(sub_blk_req), .s_blk_base(sub_blk_base), .s_blk_len(sub_blk_len),
+        .s_blk_gnt(sub_blk_gnt), .s_blk_next(sub_blk_next),
+        .s_blk_dv(o_blk_dv[2]), .s_blk_data(sub_blk_data), .s_blk_fin(sub_blk_fin),
+        .o_sub_row_cnt(sub_row_cnt), .o_sub_hit(sub_hit),
         .win_on(win_on),
         .win_x0(win_x0), .win_y0(win_y0), .win_w(win_w), .win_h(win_h),
         .step_q16(z_a_step), .off_u_q16(z_a_offu), .off_v_q16(z_a_offv),
@@ -1641,6 +1708,70 @@ module top_m2 #(
                     aud_fail <= 1'b1;
                     aud_want <= 1'b0;
                     aud_st   <= 2'd3;
+                end
+            end
+            // ---- 3：做完，不再动 ----
+            default: ;
+            endcase
+        end
+    end
+
+    // ============================================================
+    //  ★★★ 2026-10-08【字幕自检装载】：等音频那条做完 → 等 0.5 秒 → 装一条 .SUB
+    //    ★ 顺序是刻意的：A 只有一个"start"口，两个自产装载必须串起来。
+    //      这里用"等 aud_loaded / aud_fail（或 AUDIO_OFF）+ 图已经出来"当闸门。
+    // ============================================================
+    always @(posedge clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin
+            sub_st         <= 2'd0;
+            sub_load_pulse <= 1'b0;
+            sub_loaded     <= 1'b0;
+            sub_fail       <= 1'b0;
+            sub_wait       <= 26'd0;
+        end
+        else begin
+            sub_load_pulse <= 1'b0;
+            case (sub_st)
+            // ---- 0：等"音频那条自检"收工（或音频关掉），并且图已经出来过 ----
+            2'd0: begin
+                if ((AUDIO_OFF || aud_loaded || aud_fail) && load_done_latch) begin
+                    sub_wait <= 26'd0;
+                    sub_st   <= 2'd1;
+                end
+            end
+            // ---- 1：挑一个"没在换图 / 没在装别的"的时刻，等 0.5 秒再发 ----
+            2'd1: begin
+                if (!tr_active && !a_busy && !req_pend_w && !aud_load_pulse) begin
+                    if (sub_wait >= 26'd25_000_000) begin      // 0.5 s @50MHz
+                        sub_load_pulse <= 1'b1;
+                        sub_wait       <= 26'd0;
+                        sub_st         <= 2'd2;
+                    end
+                    else sub_wait <= sub_wait + 26'd1;
+                end
+            end
+            // ---- 2：等这一条字幕写进 SDRAM；失败就当没有字幕（不再重试）----
+            2'd2: begin
+                if (a_sub_done) begin
+                    sub_loaded <= 1'b1;
+                    sub_st     <= 2'd3;
+                end
+                // ★ 等 40 ms 之后再信 a_fail：`a_fail` 是三条链**合并**的出错口，
+                //   之前的装载（比如卡里没 WAV）可能已经把它拉高过，不能立刻判死。
+                else if (sub_wait < 26'd2_000_000) begin
+                    sub_wait <= sub_wait + 26'd1;
+                end
+                else if (a_fail) begin
+                    sub_fail <= 1'b1;
+                    sub_st   <= 2'd3;
+                end
+                // ★ 另一个兜底：A 已经闲下来了却迟迟没有 sub_done ⇒ 那条链没跑起来
+                else if (!a_busy) begin
+                    sub_wait <= sub_wait + 26'd1;
+                    if (sub_wait >= 26'd50_000_000) begin      // 1 s
+                        sub_fail <= 1'b1;
+                        sub_st   <= 2'd3;
+                    end
                 end
             end
             // ---- 3：做完，不再动 ----

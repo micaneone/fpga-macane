@@ -90,6 +90,22 @@
                     <Attr Name="CompileOrder" Val="10"/>
                 </FileInfo>
             </File>
+            <File Path="../a_image/sub_analyze.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="10"/>
+                </FileInfo>
+            </File>
+            <File Path="../a_image/sub2sdram.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="10"/>
+                </FileInfo>
+            </File>
             <File Path="../a_image/wav2sdram.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
@@ -182,6 +198,14 @@
                 </FileInfo>
             </File>
             <File Path="../b_display/transition_ctrl.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="22"/>
+                </FileInfo>
+            </File>
+            <File Path="../b_display/subtitle_ovl.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
                     <Attr Name="UsedInP&R" Val="true"/>
