@@ -278,6 +278,8 @@ module disp_top #(
         .de_in(de_mix), .vs_in(vs_mix),
         .x_in(o_dbg_x), .y_in(o_dbg_y), .px_in(px_mix),
         .px_out(px_z), .de_out(de_z), .vs_out(vs_z),
+        // ★★ 2026-10-09：整条字幕在【显存域】取回来（读口那个域），像素侧在 clk_pix
+        .clk_mem(clk_mem), .rst_mem_n(rst_mem_n),
         .sub_on(sub_on), .sub_x0(sub_x0), .sub_y0(sub_y0),
         .sub_w(sub_w), .sub_h(sub_h), .sub_base(sub_base), .ink(sub_ink),
         .mem_req(s_blk_req), .mem_base(s_blk_base), .mem_len(s_blk_len),

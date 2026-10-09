@@ -39,7 +39,13 @@ module blk_rd_arb #(
     //   所以：连续这么多拍没有任何一个字被取走，就放弃这一块、把读口放回去。
     //   8192 拍 @125MHz ≈ 65 µs，和 line_buf 自己的看门狗同量级。
     parameter integer SERV_MAX = 8192
-)(
+    ,
+    // ★★★ 2026-10-09【收尾兜底】：S_TAIL 的看门狗上限。
+    //   原来是共用 SERV_MAX(8192 拍 = 65 µs)，可短块漏掉 read_finish 时会**真的等满**，
+    //   把显示/音频的读口整整卡 65 µs（> 一行 26.4 µs）⇒ 掉行 + 音频饿死。
+    //   现在收尾这条路的兜底 = 256 拍 ≈ **2 µs**（远小于一行，掉不了行）。
+    parameter integer TAIL_MAX = 256
+)( 
     input  wire        clk_mem,
     input  wire        rst_mem_n,
 
@@ -57,6 +63,15 @@ module blk_rd_arb #(
     //   有它才敢"边填边取"：**没字就不发 read_en**（否则取到空 FIFO 是脏数据）。
     //   也因此不用"等整块读完"，1536 宽的一行 771 字一块就够。
     input  wire        rd_used_nz,         // FIFO 非空
+    // ★★★ 2026-10-09【短块收尾修正】：官方读控制器"读指令进行中"（= vendor_rd_path 的 o_rd_busy）
+    //   为什么要它：S_TAIL 原来只等 `rd_fin`，而官方那条 `read_finish` **只亮一拍**。
+    //   长块（显示一行 300~800 字）没问题，可**短块**（字幕 25 字 / 音频 64 字）
+    //   很可能在申请方把字取完之前官方就已经报完 finish ⇒ 我们**漏掉那个脉冲** ⇒
+    //   在 S_TAIL 里**死等到看门狗**（SERV_MAX = 8192 拍 = 65 µs）才把读口还回去。
+    //   ★ 上板实测（2026-10-09）：显示读请求最大推迟 = 8192 拍，屏幕底部那块
+    //     因为行缓冲被看门狗放弃而变成米白 + 黑横线，音频也被饿成一片沙沙声。
+    //   ⇒ 现在就认"官方已经不忙了"就收尾（块的字早就取完了）。
+    input  wire        rd_busy,
 
     // ============================================================
     //  二、显示申请人（一行一个块）
@@ -204,24 +219,28 @@ module blk_rd_arb #(
                     take_cnt <= 21'd0;
                     st       <= S_REQ;
                 end
-                else if (a_req) begin
-                    owner    <= OW_AUD;
-                    blk_base <= a_base;
-                    blk_len  <= a_len;
-                    rd_base  <= a_base;
-                    rd_len   <= a_len;
-                    rd_req   <= 1'b1;
-                    take_cnt <= 21'd0;
-                    st       <= S_REQ;
-                end
-                // ★ 2026-10-08：字幕排在最后（显示 > 音频 > 字幕）。
-                //   它一次只借 25 个字、一帧借 64 次，让一步毫无代价。
+                // ★★★ 2026-10-09【优先级改序】：显示 > **字幕** > 音频。
+                //   原来是 显示 > 音频 > 字幕，上板实测字幕被饿到"每帧只取到几行"
+                //   （行缓冲老是旧的 ⇒ 屏幕底部变米白 + 几条黑横线）。
+                //   字幕一次只借 25 个字、而且要"下一条扫描线之前"拿到，比音频（64 字、
+                //   1.3 ms 才要一次）更急 ⇒ 让字幕排在音频前面。音频有 128 字缓冲(2.7 ms)
+                //   扛得住偶尔往后排一次。
                 else if (s_req) begin
                     owner    <= OW_SUB;
                     blk_base <= s_base;
                     blk_len  <= s_len;
                     rd_base  <= s_base;
                     rd_len   <= s_len;
+                    rd_req   <= 1'b1;
+                    take_cnt <= 21'd0;
+                    st       <= S_REQ;
+                end
+                else if (a_req) begin
+                    owner    <= OW_AUD;
+                    blk_base <= a_base;
+                    blk_len  <= a_len;
+                    rd_base  <= a_base;
+                    rd_len   <= a_len;
                     rd_req   <= 1'b1;
                     take_cnt <= 21'd0;
                     st       <= S_REQ;
@@ -283,9 +302,15 @@ module blk_rd_arb #(
             end
 
             // ---- 收尾：等 read_fin（官方那块确实读完了），再交回 IDLE ----
+            //   ★★★ 2026-10-09：三条出口 —— ① `rd_fin` 来了（正常）
+            //     ② **官方已经不忙了**（`!rd_busy`：短块最容易走这条 —— 字早就取完了，
+            //        只是那个一拍宽的 finish 在我们进 S_TAIL 之前就过去了）
+            //     ③ `TAIL_MAX` 兜底（远小于 SERV_MAX，绝不长期占着读口）
+            //   ★ 早放口是**安全**的：官方模块在每次 read_req 被受理时会异步清读 FIFO，
+            //     所以下一块开始时不会有上一块的残字串进来（见文件头那段）。
             S_TAIL: begin
                 rd_en <= 1'b0;
-                if (rd_fin) begin
+                if (rd_fin || !rd_busy) begin
                     if (owner == OW_AUD)      begin a_gnt <= 1'b0; a_done <= 1'b1; end
                     else if (owner == OW_SUB) begin s_gnt <= 1'b0; s_done <= 1'b1; end
                     else                      begin d_gnt <= 1'b0; d_done <= 1'b1; end
@@ -293,7 +318,8 @@ module blk_rd_arb #(
                 end
                 // ★ 收尾也兜一个底：官方的 read_finish 只亮一拍，万一它在我们
                 //   进 S_TAIL 之前就过去了（FIFO 够深时是可能的），这里不能死等。
-                else if (serv_cnt >= SERV_MAX[13:0]) begin
+                //   ★ 2026-10-09：兜底值改成 TAIL_MAX（256 拍 = 2 µs），不再用 SERV_MAX(65 µs)
+                else if (serv_cnt >= TAIL_MAX[13:0]) begin
                     o_timeout <= 1'b1;
                     if (owner == OW_AUD)      a_gnt <= 1'b0;
                     else if (owner == OW_SUB) s_gnt <= 1'b0;

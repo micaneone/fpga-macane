@@ -1080,6 +1080,9 @@ module top_m2 #(
         .rd_base        (blk_rd_base), .rd_len(blk_rd_len),
         .rd_en          (blk_rd_re), .rd_data(vrd_dout),
         .rd_used_nz     (vrd_used_nz),
+        // ★★ 2026-10-09：短块收尾要用"官方还忙不忙"来判（漏掉一拍宽的 read_finish 时
+        //   不再死等到看门狗 —— 那一下会把显示/音频的读口卡 65 µs）
+        .rd_busy        (rd_busy_w),
         // 显示口（接到 disp_top 的 blk_*）
         .d_req          (d_blk_req), .d_base(d_blk_base), .d_len(d_blk_len),
         .d_gnt          (blk_d_gnt), .d_next(d_blk_want),
