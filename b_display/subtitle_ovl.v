@@ -72,7 +72,15 @@ module subtitle_ovl (
 
     // ---------------- 诊断 ----------------
     output reg  [15:0] o_row_cnt,   // 取回整条字幕的次数（≈ 帧数）
-    output reg         o_hit        // sticky：真的画过（bit=1）至少一次
+    output reg         o_hit,       // sticky：真的画过（bit=1）至少一次
+    // ★★★ 2026-10-09【决定性指纹】：取完一条之后在垂直消隐里把片上字幕 RAM 扫一遍
+    //   o_sum16 = 1600 个字**求和**的低 16 位（对"位序 / 极性"敏感）
+    //   o_nz    = **第一个非零字的下标**（对"行序 / 内容"敏感）+ o_nz_v 有效位
+    //   ★ 电脑上按同一套规则（bit31=最左、黑=1、自下而上）算 SUB1.SUB 的期望值，
+    //     和串口这两个数一比：**对上 ⇒ 片上数据是对的**（问题在显示级）；对不上 ⇒ 数据级。
+    output reg  [15:0] o_sum16,
+    output reg  [10:0] o_nz,
+    output reg         o_nz_v
 );
 
     // ============================================================
@@ -97,6 +105,7 @@ module subtitle_ovl (
     reg        fetch_tgl;        // 像素域：每帧翻一次
     reg        ft1, ft2, ft3;    // 显存域：三级同步 + 检边沿
     wire       fetch_start = ft2 ^ ft3;
+    reg        fetch_done_tgl;   // ★ 显存域：每次取完一条翻一次（给像素域做自检扫描用）
 
     always @(posedge clk_pix or negedge rst_pix_n) begin
         if (!rst_pix_n) begin
@@ -130,6 +139,7 @@ module subtitle_ovl (
             ft2       <= 1'b0;
             ft3       <= 1'b0;
             o_row_cnt <= 16'd0;
+            fetch_done_tgl <= 1'b0;
         end
         else begin
             ft1 <= fetch_tgl;  ft2 <= ft1;  ft3 <= ft2;      // toggle 三级同步
@@ -161,6 +171,7 @@ module subtitle_ovl (
                     m_req  <= 1'b0;
                     m_next <= 1'b0;
                     fst    <= F_IDLE;
+                    fetch_done_tgl <= ~fetch_done_tgl;   // ★ 取完一条 ⇒ 通知像素域去自检
                 end
             end
             default: fst <= F_IDLE;
@@ -186,21 +197,60 @@ module subtitle_ovl (
     wire [11:0] widx_raw = row_x25 + {7'd0, sx_cur[9:5]};
     wire [10:0] widx    = (widx_raw < 12'd1600) ? widx_raw[10:0] : 11'd0;   // 越界就指 0
 
-    reg  [31:0] mword_q;             // 下一拍 = "下一个像素"所在的那个 32 位字
+    // ★★ 2026-10-09：这唯一的读口现在由【显示】和【自检扫描】分时共用
+    reg  [31:0] rd_q;                // 唯一读口的输出寄存器（显示用的字就是它）
+    reg  [11:0] sc_idx;
+    reg         sc_run;
+    reg  [31:0] sc_sum;
+    reg         sc_nz_v;
+    reg  [10:0] sc_nz;
+    reg         fd1, fd2, fd3;       // clk_mem 的"取完了"toggle → 像素域三级同步
+    wire [10:0] rd_addr = sc_run ? ((sc_idx > 12'd1599) ? 11'd1599 : sc_idx[10:0])
+                                 : widx;
     reg         de_1, vs_1;
     reg  [11:0] x_1, y_1;
     reg  [15:0] px_1;
 
     always @(posedge clk_pix or negedge rst_pix_n) begin
         if (!rst_pix_n) begin
-            mword_q <= 32'd0;
+            rd_q <= 32'd0;
             de_1 <= 1'b0; vs_1 <= 1'b0; x_1 <= 12'd0; y_1 <= 12'd0; px_1 <= 16'd0;
+            sc_idx <= 12'd0; sc_run <= 1'b0; sc_sum <= 32'd0;
+            sc_nz_v <= 1'b0; sc_nz <= 11'd0;
+            fd1 <= 1'b0; fd2 <= 1'b0; fd3 <= 1'b0;
+            o_sum16 <= 16'd0; o_nz <= 11'd0; o_nz_v <= 1'b0;
         end
         else begin
-            mword_q <= cmem[widx];                   // ★ 读侧（clk_pix，寄存读 = BRAM 形状）
+            rd_q <= cmem[rd_addr];                   // ★ 读侧（clk_pix，寄存读 = BRAM 形状）
             de_1 <= de_in;  vs_1 <= vs_in;
             x_1  <= x_in;   y_1  <= y_in;
             px_1 <= px_in;
+
+            // ---- 自检扫描：取完一条之后，趁垂直消隐把 1600 个字扫一遍 ----
+            fd1 <= fetch_done_tgl; fd2 <= fd1; fd3 <= fd2;
+            if (!sc_run && (fd2 ^ fd3)) begin
+                sc_run <= 1'b1;
+                sc_idx <= 12'd0;
+                sc_sum <= 32'd0;
+                sc_nz_v <= 1'b0;
+            end
+            else if (sc_run) begin
+                // rd_q 这一刻是上一拍地址（= sc_idx-1）那个字
+                if (sc_idx >= 12'd1) begin
+                    sc_sum <= sc_sum + rd_q;
+                    if (!sc_nz_v && (rd_q != 32'd0)) begin
+                        sc_nz_v <= 1'b1;
+                        sc_nz   <= sc_idx - 12'd1;
+                    end
+                end
+                if (sc_idx >= 12'd1600) begin
+                    sc_run  <= 1'b0;
+                    o_sum16 <= sc_sum[15:0];
+                    o_nz    <= sc_nz;
+                    o_nz_v  <= sc_nz_v;
+                end
+                else sc_idx <= sc_idx + 12'd1;
+            end
         end
     end
 
@@ -214,7 +264,7 @@ module subtitle_ovl (
                   && (x_1 >= sub_x0) && (x_1 < (sub_x0 + sub_w))
                   && (y_1 >= sub_y0) && (y_1 < (sub_y0 + sub_h));
     // ★ 用"右移"取位，不用非常量位选（老工具对那种写法挑）
-    wire ink_bit_1 = ((mword_q >> (5'd31 - sx_1[4:0])) & 32'd1) == 32'd1;
+    wire ink_bit_1 = ((rd_q >> (5'd31 - sx_1[4:0])) & 32'd1) == 32'd1;
     // ★ 自产方块（8×8 棋盘）：只在左半屏用它，用来和"真字幕"对照
     wire tpat_bit_1 = sx_1[3] ^ y_1[3];
     wire use_tpat   = tpat_half && (sx_1 < (sub_w >> 1));

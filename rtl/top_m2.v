@@ -1046,6 +1046,9 @@ module top_m2 #(
     wire [31:0] sub_blk_data;
     wire [15:0] sub_row_cnt;
     wire        sub_hit;
+    wire [15:0] sub_sum16;           // ★ 指纹：片上字幕 RAM 求和低 16
+    wire [10:0] sub_nz;              // ★ 指纹：第一个非零字下标
+    wire        sub_nz_v;
     wire [31:0] blk_d_data;
 
     vendor_rd_path u_vrd (
@@ -1531,6 +1534,7 @@ module top_m2 #(
         .s_blk_gnt(sub_blk_gnt), .s_blk_next(sub_blk_next),
         .s_blk_dv(o_blk_dv[2]), .s_blk_data(sub_blk_data), .s_blk_fin(sub_blk_fin),
         .o_sub_row_cnt(sub_row_cnt), .o_sub_hit(sub_hit),
+        .o_sub_sum16(sub_sum16), .o_sub_nz(sub_nz), .o_sub_nz_v(sub_nz_v),
         .win_on(win_on),
         .win_x0(win_x0), .win_y0(win_y0), .win_w(win_w), .win_h(win_h),
         .step_q16(z_a_step), .off_u_q16(z_a_offu), .off_v_q16(z_a_offv),
@@ -1952,12 +1956,13 @@ module top_m2 #(
         .lb_wbase(lb_wbase0[15:0]), .lb_rd0(lb_rd0[15:0]),
         .lb_rd1(lb_rd1[15:0]),      .lb_words({4'd0, lb_words0}),
         // ★ 逐字对齐校验：第 1 个字偏几个 / 本趟几个字不对（0 = 逐字全对）
-        //   ★★ 2026-10-09【临时占用 · 查字幕】：这两个口只在"地址图"模式下有意义
-        //      （现在屏上是真照片 ⇒ 它们的读数本来就没意义），先借来报字幕：
-        //        字段 19 = 字幕叠加"取回来多少行"（>0 就说明叠加真在跑、真在读 SDRAM）
-        //        字段 20 = A 报"这条字幕写了多少个字"（期望 1600 = 0640）
+        //   ★★★ 2026-10-09【临时占用 · 查字幕指纹】：这两个口只在"地址图"模式下有意义
+        //      （现在屏上是真照片 ⇒ 它们的读数本来就没意义），借来报字幕指纹：
+        //        字段 19 = **片上字幕 RAM 1600 字求和**的低 16 位（对位序/极性敏感）
+        //        字段 20 = {bit15 有效, bit10:0 **第一个非零字的下标**}（对行序/内容敏感）
+        //      电脑上按同一套规则算 SUB1.SUB 的期望值，一比就知道"片上数据对不对"。
         //      查完字幕再换回 lb_off / lb_alignbad。
-        .lb_off(sub_row_cnt), .lb_alignbad(a_dbg_sub_wr_cnt[15:0]),
+        .lb_off(sub_sum16), .lb_alignbad({4'd0, sub_nz_v, sub_nz}),
         // ★ 测试旋钮：当前在途上限档位 / key1 按了多少次
         // ★ M2：字段 29（原 cmp_sel）现在报【当前缩放档 0..5】；字段 30 是 KEY1 按了几次
         .cmp_sel({13'd0, zoom_lv}), .key_cnt({12'd0, key_cnt}),

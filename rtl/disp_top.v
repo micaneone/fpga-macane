@@ -88,6 +88,9 @@ module disp_top #(
     input  wire        s_blk_fin,
     output wire [15:0] o_sub_row_cnt,
     output wire        o_sub_hit,
+    output wire [15:0] o_sub_sum16,   // ★ 指纹：片上字幕 RAM 求和的低 16 位
+    output wire [10:0] o_sub_nz,      // ★ 指纹：第一个非零字的下标
+    output wire        o_sub_nz_v,
 
     // ---------------- 窗口（来自 stub_win_table）----------------
     input  wire        win_on,
@@ -288,6 +291,7 @@ module disp_top #(
         .mem_gnt(s_blk_gnt), .mem_next(s_blk_next),
         .mem_dv(s_blk_dv), .mem_data(s_blk_data), .mem_fin(s_blk_fin),
         .o_row_cnt(o_sub_row_cnt), .o_hit(o_sub_hit)
+        ,.o_sum16(o_sub_sum16), .o_nz(o_sub_nz), .o_nz_v(o_sub_nz_v)
     );
 
     // ============================================================
