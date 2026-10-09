@@ -113,6 +113,7 @@ $shown = 0
 $firstW = $null; $lastW = $null
 $firstA = $null; $lastA = $null
 $sawBusy = 0; $sawOverlap = 0
+$lastSub = -1; $lastSubRows = 0; $lastSubWords = 0
 
 foreach ($l in $lines) {
     if ($l.Length -lt 132) { continue }        # 33 fields = 132 chars
@@ -132,15 +133,20 @@ foreach ($l in $lines) {
 
     if ($firstW -eq $null) { $firstW = $W; $firstA = $Apx }
     $lastW = $W; $lastA = $Apx
+    # ★ 2026-10-09: field 28 low byte = SUBTITLE status; field 19 = overlay rows fetched;
+    #   field 20 = words A reported for that subtitle (expect 0x0640 = 1600).
+    $lastSub      = $v[27] -band 0xFF
+    $lastSubRows  = $v[19]
+    $lastSubWords = $v[20]
 
     $pll = BitN $st 0; $sd = BitN $st 1; $ab = BitN $st 2; $ld = BitN $st 3
     $fa  = BitN $st 4; $ov = BitN $st 5; $hd = BitN $st 7
     $want = BitN $fl 4; $allow = BitN $fl 5
     if ($ab -eq 1) { $sawBusy = 1; if ($allow -eq 1) { $sawOverlap = 1 } }
 
-    "f{0,4} F={1,3} S={2:X2}(pll{3} sd{4} busy{5} done{6} FAIL{7} OVR{8} hdmi{9}) W={10:X6} Apx={11:X6} zoom={12} key1={13} | gate want={14} allow={15} | lb asked={16:X4} got1={17:X4} got2={18:X4} words={19:X3} off={20,3} bad={21,3}" -f `
+    "f{0,4} F={1,3} S={2:X2}(pll{3} sd{4} busy{5} done{6} FAIL{7} OVR{8} hdmi{9}) W={10:X6} Apx={11:X6} zoom={12} key1={13} | gate want={14} allow={15} | lb asked={16:X4} got1={17:X4} got2={18:X4} words={19:X3} subRows={20,5} subWords={21,5} sub={22:X2}" -f `
         $shown, $v[3], $st, $pll, $sd, $ab, $ld, $fa, $ov, $hd, $W, $Apx, $v[17], $v[18],
-        $want, $allow, $v[13], $v[14], $v[15], $v[16], $v[19], $v[20]
+        $want, $allow, $v[13], $v[14], $v[15], $v[16], $v[19], $v[20], ($v[27] -band 0xFF)
 }
 
 "";"============================================================"
@@ -167,3 +173,27 @@ if ($sawBusy -eq 1) {
     if ($sawOverlap -eq 1) { "!! saw want=1 AND allow=1 while A was busy -> OVERLAP" }
     else                   { "ok: the read gate stayed closed while A was busy" }
 } else { "(A was never busy during this capture - load an image and re-run)" }
+
+# ============================================================
+#  ★ 2026-10-09 SUBTITLE decode (field 28 low byte; see B-track ledger 26.3)
+#      b7 sub_loaded  b6 sub_fail  b5 load pulse was sent  b4 a_sub_done seen
+#      b3 sub_overrun b2 sub_short b1:0 sub_st
+#    field 19 (temp) = overlay rows fetched into the row buffer (>0 = overlay running)
+#    field 20 (temp) = words A reported for that subtitle  (expect 1600 = 0x0640)
+# ============================================================
+"";"--- subtitle (field 28 low byte / field 19 / field 20) ---------------"
+"sub byte = 0x{0:X2}  (loaded{1} fail{2} pulse{3} done{4} ovr{5} short{6} st={7})" -f `
+    $lastSub, (BitN $lastSub 7), (BitN $lastSub 6), (BitN $lastSub 5), (BitN $lastSub 4), `
+    (BitN $lastSub 3), (BitN $lastSub 2), ($lastSub -band 3)
+"overlay rows fetched = {0}   words A wrote for the subtitle = {1} (0x{1:X}, expect 1600)" -f `
+    $lastSubRows, $lastSubWords
+if ((BitN $lastSub 7) -eq 1) {
+    "  => subtitle IS in SDRAM. If nothing on screen, the problem is the DISPLAY side"
+    "     (rows fetched should be >0; if 0, the overlay is not running)"
+} elseif ((BitN $lastSub 6) -eq 1) {
+    "  => subtitle LOAD FAILED (look at ovr/short, then the card file)"
+} elseif ((BitN $lastSub 5) -eq 1) {
+    "  => pulse went out but no a_sub_done: card side (file not found / bad header / read err)"
+} else {
+    "  => the subtitle load was never started (check that load_done_latch and aud_loaded are 1)"
+}
