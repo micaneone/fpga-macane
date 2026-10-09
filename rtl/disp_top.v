@@ -76,6 +76,7 @@ module disp_top #(
     input  wire [11:0] sub_h,         // 契约固定 64
     input  wire [20:0] sub_base,      // 字幕区基址 + 条号×1600
     input  wire [15:0] sub_ink,       // bit=1 画这个颜色（默认黑）
+    input  wire        sub_tpat,      // ★ 一次性诊断：左半屏画自产方块（见 subtitle_ovl 注释）
     // 读口第三个客户（→ blk_rd_arb 的 s_* 那一组）
     output wire        s_blk_req,
     output wire [20:0] s_blk_base,
@@ -282,6 +283,7 @@ module disp_top #(
         .clk_mem(clk_mem), .rst_mem_n(rst_mem_n),
         .sub_on(sub_on), .sub_x0(sub_x0), .sub_y0(sub_y0),
         .sub_w(sub_w), .sub_h(sub_h), .sub_base(sub_base), .ink(sub_ink),
+        .tpat_half(sub_tpat),
         .mem_req(s_blk_req), .mem_base(s_blk_base), .mem_len(s_blk_len),
         .mem_gnt(s_blk_gnt), .mem_next(s_blk_next),
         .mem_dv(s_blk_dv), .mem_data(s_blk_data), .mem_fin(s_blk_fin),

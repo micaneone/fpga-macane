@@ -64,6 +64,11 @@ module subtitle_ovl (
     input  wire [11:0] sub_h,       // 契约固定 64
     input  wire [20:0] sub_base,    // 字幕区基址 + 条号×1600
     input  wire [15:0] ink,         // bit=1 画这个颜色（默认 16'h0000 = 黑）
+    // ★★★ 2026-10-09【一次性诊断开关】：=1 时**左半屏画"自产方块"、右半屏画真字幕**。
+    //   上板看到"斜着的黑块"时，用它一句话分开：
+    //     左半屏的方块**整齐** ⇒ 几何/位置/位序都对 ⇒ 问题在**字幕数据**（卡上的素材）；
+    //     左半屏也歪/也斜 ⇒ 问题在**显示这一级**。
+    input  wire        tpat_half,
 
     // ---------------- 诊断 ----------------
     output reg  [15:0] o_row_cnt,   // 取回整条字幕的次数（≈ 帧数）
@@ -210,6 +215,10 @@ module subtitle_ovl (
                   && (y_1 >= sub_y0) && (y_1 < (sub_y0 + sub_h));
     // ★ 用"右移"取位，不用非常量位选（老工具对那种写法挑）
     wire ink_bit_1 = ((mword_q >> (5'd31 - sx_1[4:0])) & 32'd1) == 32'd1;
+    // ★ 自产方块（8×8 棋盘）：只在左半屏用它，用来和"真字幕"对照
+    wire tpat_bit_1 = sx_1[3] ^ y_1[3];
+    wire use_tpat   = tpat_half && (sx_1 < (sub_w >> 1));
+    wire ink_draw   = use_tpat ? tpat_bit_1 : ink_bit_1;
 
     always @(posedge clk_pix or negedge rst_pix_n) begin
         if (!rst_pix_n) begin
@@ -221,7 +230,7 @@ module subtitle_ovl (
         else begin
             de_out <= de_1;                       // ★ de/vs 和像素一起打第二拍，绝不拆开
             vs_out <= vs_1;
-            if (in_rect_1 && ink_bit_1) begin
+            if (in_rect_1 && ink_draw) begin
                 px_out <= ink;                    // bit=1 → 画（黑 = 字）
                 o_hit  <= 1'b1;
             end

@@ -40,14 +40,12 @@
 
 module aud_blk_rd #(
     parameter integer BLK_WORDS = 64,       // 一次块请求多少字
-    // ★★ 2026-10-09【省面积】：9 → 7（512 → 128 字）。
-    //   为什么：这颗 FIFO 是**寄存器数组**（`reg[31:0] afifo[]`），512×32 = 16,384 bit
-    //   ⇒ 综合出来一个人吃 ~1,900 LUT。加上字幕链之后全设计 LUT 冲到 85.65%，
-    //   布线级的 slices 会逼近 100%（同一版就可能布不下/时序崩）。
-    //   128 字 = 128 × 20.8 µs/字 ≈ **2.7 ms** 的音频余量，而一次块请求只要 64 字
-    //   （1.3 ms），完全够 —— 和当年 `sdr_rd_arb` 那个 512→128 是同一个修法。
-    //   ★ 回退：改回 9 即可（行为等价，只是面积大）。
-    parameter integer AFIFO_AW  = 7,        // 跨域 FIFO 深度 = 2^7 = 128 字
+    // ★★★ 2026-10-09 晚【A/B 实验】：7 → 回到 **9**（512 字）。
+    //   上午为了省面积把它缩到 128 字（省 ~1,200 LUT），可上板之后**音频只有沙沙声**。
+    //   现在设计 LUT 只有 68%（字幕 RAM 进了 BRAM，面积反而降了），所以先把它
+    //   **恢复成 512 字**做对照：如果音乐回来 ⇒ 就是 FIFO 太小（那以后保持 9）；
+    //   如果还是沙沙声 ⇒ 与 FIFO 无关，看 `o_underrun`（饿死探针）。
+    parameter integer AFIFO_AW  = 9,        // 跨域 FIFO 深度 = 2^9 = 512 字
     parameter integer SERV_MAX  = 20000     // 看门狗：一块最多等多少拍（@125MHz ≈ 160 µs）
 )(
     // ---------------- 显存域 125 MHz ----------------
@@ -76,6 +74,10 @@ module aud_blk_rd #(
     output wire        aud_vld,
     input  wire        aud_next,
     output wire        aud_busy,
+
+    // ★★ 2026-10-09【饿死探针】：消费端要一个字、而 FIFO 当时是空的 ⇒ sticky 置起。
+    //   上板一句话就能判"沙沙声是不是因为 SDRAM 读没跟上（FIFO 被饿穿）"。
+    output reg         o_underrun,
 
     // ---------------- 诊断 ----------------
     output reg  [15:0] dbg_cnt,         // 本次播放从 SDRAM 收了多少个字（饱和）
@@ -287,6 +289,13 @@ module aud_blk_rd #(
 
     assign aud_dout = afifo[arp[AFIFO_AW-1:0]];
     assign aud_vld  = (afifo_cnt != {(AFIFO_AW+1){1'b0}});
+
+    // ★★ 2026-10-09【饿死探针】：消费端 `aud_next` 要字、而这一拍 FIFO 里没有 ⇒ sticky。
+    //   注意：只在"这一拍确实在消费"时才算（`aud_next` 本来就是消费脉冲）。
+    always @(posedge clk_aud or negedge rst_aud_n) begin
+        if (!rst_aud_n)         o_underrun <= 1'b0;
+        else if (aud_next && !aud_vld) o_underrun <= 1'b1;
+    end
 
     // ---- 初始化一下 FIFO 内容（仿真/上电时别读 X；上板不需要但无害）----
     initial begin

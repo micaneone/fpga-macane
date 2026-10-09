@@ -126,7 +126,9 @@ module top_aud #(
     output wire        dbg_aud_vld,
     output wire        dbg_blk_stall,   // ★ 块级读看门狗掐断过（sticky）
     output wire [15:0] dbg_aud_cnt,     // ★★ 第 8 条：音频数据自检（本次播放收了多少字）
-    output wire [31:0] dbg_aud_sum      // ★★ 第 8 条：音频数据自检（这些字的 32 位和）
+    output wire [31:0] dbg_aud_sum,     // ★★ 第 8 条：音频数据自检（这些字的 32 位和）
+    // ★★★ 2026-10-09：块级 FIFO 被饿穿过（sticky）—— 判"沙沙声是不是读没跟上"
+    output wire        dbg_aud_underrun
 );
 
     // ============================================================
@@ -142,6 +144,7 @@ module top_aud #(
     wire [31:0] aud_dout;
     wire        aud_vld;
     wire        aud_next;
+    wire        aud_underrun_w;      // ★★ 2026-10-09：块级 FIFO 饿死探针（sticky）
 
     // ---- 内部 ----
     wire        aud_busy;
@@ -154,6 +157,7 @@ module top_aud #(
     assign dbg_aud_dout  = aud_dout;
       assign o_audio_valid = audio_valid;
     assign dbg_aud_vld   = aud_vld;
+    assign dbg_aud_underrun = aud_underrun_w;
 
     // ============================================================
     //  ① sfx_ctrl —— 第几条 → 基址 / 字数
@@ -184,12 +188,10 @@ module top_aud #(
     // ============================================================
     aud_blk_rd #(
         .BLK_WORDS (64),        // 一次 64 字（= 2.67 ms 的音频，够粗够省）
-        // ★★ 2026-10-09【省面积】9 → 7（512 → 128 字 ≈ 2.7 ms）。
-        //   这颗 FIFO 是**寄存器数组**，512 字一个人吃 ~1,900 LUT —— 加上字幕链之后
-        //   全设计 LUT 冲到 85.65%，布线级 slices 会逼近 100%（同一版可能就布不下）。
-        //   128 字 = 2.7 ms 的音频余量，而一次块请求只要 64 字（1.3 ms），够用。
-        //   ★ 和当年 `sdr_rd_arb` 那个 512→128 是同一个修法。回退：改回 9。
-        .AFIFO_AW  (7)          // FIFO 128 字 ≈ 2.7 ms
+        // ★★★ 2026-10-09 晚【A/B 实验】：缩小的 7 先退回 **9**（512 字）。
+        //   上午缩到 128 字省了 ~1,200 LUT，可上板音频只剩沙沙声；
+        //   现在 LUT 只 68%（字幕 RAM 进 BRAM，面积反而降了），所以恢复 512 做对照。
+        .AFIFO_AW  (9)          // FIFO 512 字 ≈ 21 ms
     ) u_aud_blk_rd (
         .clk_mem       (clk_mem),
         .rst_mem_n     (rst_mem_n),
@@ -220,7 +222,8 @@ module top_aud #(
         .dbg_cnt       (dbg_aud_cnt),
         .dbg_sum       (dbg_aud_sum),
         .dbg_blk_cnt   (),
-        .o_stall       (dbg_blk_stall)
+        .o_stall       (dbg_blk_stall),
+        .o_underrun    (aud_underrun_w)      // ★★ 饿死探针
     );
 
     // ============================================================

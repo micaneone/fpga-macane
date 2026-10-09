@@ -234,6 +234,7 @@ module top_m2 #(
     wire        aud_dbg_vld, aud_dbg_play_tgl;
     wire [15:0] aud_dbg_cnt;            // ★★ 第 8 条：音频数据自检（字数）
     wire [31:0] aud_dbg_sum;            // ★★ 第 8 条：音频数据自检（32 位和）
+    wire        aud_dbg_underrun;       // ★★ 2026-10-09：块级 FIFO 饿死过（sticky）
     // ---- ★★★ 2026-10-06 音频的块级读口（top_aud ↔ blk_rd_arb 的音频口）----
     wire        aud_a_req;              // top_aud → 闸门
     wire        aud_a_req_g;            // 闸门后 → blk_rd_arb.a_req
@@ -273,6 +274,10 @@ module top_m2 #(
     localparam [11:0] SUB_W_DFLT  = 12'd800;      // 契约 ART_SUB_W
     localparam [11:0] SUB_H_DFLT  = 12'd64;       // 契约 ART_SUB_H
     localparam [15:0] SUB_INK     = 16'h0000;     // ★ bit=1 画这个颜色（黑 = 文字）
+    // ★★★ 2026-10-09 一次性诊断开关：=1 ⇒ **左半屏画自产 8×8 棋盘、右半屏画真字幕**。
+    //   左半屏整齐 ⇒ 显示这一级没问题（问题在卡上的素材）；左半屏也歪 ⇒ 显示这一级的问题。
+    //   ★ 诊断完改回 0 重新出比特流即可（纯显示级开关，不影响别的）。
+    localparam SUB_TPAT = 1'b1;
 
     wire        a_sub_done;           // ← top_a：这一条字幕写进 SDRAM 了（单拍）
     reg         sub_load_pulse;       // → A 的 start（单拍；sd_mode 也由它选）
@@ -1132,6 +1137,9 @@ module top_m2 #(
             if (dbg_lock_seen) dbg_chain[7] <= 1'b1;
             if (rd_busy_w & wr_busy_w)          dbg_chain[8] <= 1'b1;
             if (rd_defer_cnt > 16'd200)         dbg_chain[9] <= 1'b1;
+            // ★★ 2026-10-09：bit10 = 音频块读 FIFO 被饿穿过（sticky）
+            //   它是"沙沙声到底是数据错、还是读没跟上"的分水岭。
+            if (aud_dbg_underrun)               dbg_chain[10] <= 1'b1;
         end
     end
 
@@ -1518,6 +1526,7 @@ module top_m2 #(
         .sub_x0(SUB_X0_DFLT), .sub_y0(SUB_Y0_DFLT),
         .sub_w(SUB_W_DFLT), .sub_h(SUB_H_DFLT),
         .sub_base(SUB_BASE), .sub_ink(SUB_INK),
+        .sub_tpat(SUB_TPAT),
         .s_blk_req(sub_blk_req), .s_blk_base(sub_blk_base), .s_blk_len(sub_blk_len),
         .s_blk_gnt(sub_blk_gnt), .s_blk_next(sub_blk_next),
         .s_blk_dv(o_blk_dv[2]), .s_blk_data(sub_blk_data), .s_blk_fin(sub_blk_fin),
@@ -1602,7 +1611,8 @@ module top_m2 #(
         .dbg_aud_vld  (aud_dbg_vld),
         .dbg_blk_stall(aud_blk_stall),
         .dbg_aud_cnt  (aud_dbg_cnt),
-        .dbg_aud_sum  (aud_dbg_sum)
+        .dbg_aud_sum  (aud_dbg_sum),
+        .dbg_aud_underrun(aud_dbg_underrun)   // ★★ 2026-10-09 饿死探针
     );
 
     // ============================================================
