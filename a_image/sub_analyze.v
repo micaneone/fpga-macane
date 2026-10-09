@@ -467,6 +467,16 @@
               .TARGET_EXT (TARGET_EXT)          // ★ {"S","U","B"}
           ) u_find_bmp (
               .sys_clk    (sys_clk),
+              // ★★ 2026-10-09【集成临时改动 · 修「字幕链一个字节都读不出来」】：
+              //   B 侧为了把图像链的 SD 读提速到 25 MHz，给 find_bmp / sd_top / sd_read
+              //   加了一个 `clk_spi` 口（读移位器的时钟；给 sys_clk = 原来的 12.5 MHz）。
+              //   音频链（wav_analyze）那边补过了，**A 的 sub_analyze 是新的、没补**：
+              //   于是这个口悬空 → TD 报 `SYN-5025: Using 0 for all undriven pins`
+              //   把移位时钟接成常量 0 ⇒ 字幕链一个扇区都读不出来 ⇒ sub_analyze 失败
+              //   ⇒ 板上 FAIL 灯亮、字幕永远不出现（2026-10-09 实测就是这么坏了一天）。
+              //   ★ 字幕数据量极小（6 KB），不提速，接 sys_clk 就好。
+              //   （见 规划\A轨待改清单.md；A 的分支要么补这一行，要么别用我们这份 find_bmp）
+              .clk_spi    (sys_clk),
               .sys_rst_n  (sys_rst_n),
 
               .spi_miso   (spi_miso),

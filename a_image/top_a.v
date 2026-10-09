@@ -312,26 +312,40 @@
               .dbg_first_addr (dbg_first_addr)
           );
 
-          bmp_scale u_bmp_scale (
-              .clk        (sys_clk),
-              .rst_n      (sys_rst_n),
-              .start      (bmp_start),
-              .src_w      (img_width),
-              .src_h      (img_height),
-              .src_we     (px_we),
-              .src_addr   (px_addr),
-              .src_px     (px_data),
-              .src_done   (bmp_done),
-              .out_we     (sc_we),
-              .out_addr   (sc_addr),
-              .out_px     (sc_px),
-              .out_done   (sc_done),
-              .out_w      (st_w),
-              .out_h      (st_h),
-              .scaled     (),
-              .err_overrun(sc_err),
-              .busy       (sc_busy)
-          );
+          // ======================================================================
+          //  ★★★ 2026-10-09【集成临时改动 · 省面积】**旁路 bmp_scale**（原例化整段注释掉在下面）
+          // ----------------------------------------------------------------------
+          //  为什么：字幕链（A 新交付）自带一整套 find_bmp/sd_top/sd_read，+1,650 LUT，
+          //          全设计 LUT 冲到 **85.65%** ⇒ 布线级 slices 会逼近 100%（同版就布不下）。
+          //          而 `bmp_scale`（788 LUT + 21 BRAM + 2 DSP）按项目自己的结论是**空转**：
+          //            · 它只在"源图装不进大槽"时才真缩；
+          //            · 演示素材（640×480 / 800×600 / 1536×1152）**全都装得下**
+          //              （最大 884,736 字 < 大槽 930,832）⇒ 一次都没缩过；
+          //            · 而且"真缩"那条路 2026-10-04 上板证明会白屏，早就收回成
+          //              "装不进才缩、素材改在 PC 端预缩"（见 规划\B轨待改清单.md §17.27）。
+          //  旁路 = 像素流直通、存储尺寸 = 源图尺寸（这就是"没缩"时的行为，逐位相同）。
+          //  ★ 代价（要知道）：以后如果塞一张**装不进大槽**的图，它不会被缩，而是
+          //    写溢出槽尾（旧行为是缩到装得下）。要恢复：把下面这段 assign 注释掉、
+          //    把例化放回来即可。
+          //  ★ 这是 B 侧集成改动（A 的分支里 bmp_scale 是活的），记在 规划\A轨待改清单.md。
+          // ======================================================================
+          assign sc_we   = px_we;
+          assign sc_addr = px_addr;
+          assign sc_px   = px_data;
+          assign sc_done = bmp_done;
+          assign st_w    = img_width;
+          assign st_h    = img_height;
+          assign sc_busy = 1'b0;
+          assign sc_err  = 1'b0;
+          // ---- 原来的例化（先留着，别删；要恢复就把它放回来、把上面 8 行注释掉）----
+          // bmp_scale u_bmp_scale (
+          //     .clk(sys_clk), .rst_n(sys_rst_n), .start(bmp_start),
+          //     .src_w(img_width), .src_h(img_height),
+          //     .src_we(px_we), .src_addr(px_addr), .src_px(px_data), .src_done(bmp_done),
+          //     .out_we(sc_we), .out_addr(sc_addr), .out_px(sc_px), .out_done(sc_done),
+          //     .out_w(st_w), .out_h(st_h), .scaled(),
+          //     .err_overrun(sc_err), .busy(sc_busy)
+          // );
 
 
           bmp2sdram u_bmp2sdram (

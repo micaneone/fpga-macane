@@ -280,6 +280,14 @@ module top_m2 #(
     reg         sub_fail;             // 装载失败过（就当没有字幕，不再重试）
     reg  [1:0]  sub_st;
     reg  [25:0] sub_wait;
+    // ---- ★★ 2026-10-09【字幕探针】上板看不到字，就靠这几个数定位 ----
+    reg         sub_pulse_lat;        // sticky：字幕装载脉冲发出去过
+    reg         sub_done_lat;         // sticky：a_sub_done 回来过
+    wire        a_dbg_sub_overrun;    // ← top_a/sub2sdram：丢字
+    wire        a_dbg_sub_short;      // ← top_a/sub2sdram：字数对不上
+    wire [31:0] a_dbg_sub_wr_cnt;     // ← top_a/sub2sdram：写了多少字（期望 1600）
+    // ★ sub_loaded 是 50 MHz 域的电平，要送进像素域用 ⇒ 两位同步器（和预装那条一个做法）
+    reg         sub_on_s1, sub_on_s2;
 
     // ---- ★ 三选一：谁在发脉冲，sd_mode/skip/基址 就是谁的 ----
     //   ★★ 用【脉冲】而不是"电平"来选：top_a 本来就是在 `start` 那一拍锁存 sd_mode 的，
@@ -631,6 +639,12 @@ module top_m2 #(
     end
     wire tr_back_ready = pfr2;                    // → disp_top → transition_ctrl
 
+    // ★★ 2026-10-09：字幕的"要不要显示"也是 50 MHz 域的电平 → 像素域，同样两位同步器
+    always @(posedge clk_pix or negedge disp_rst_n) begin
+        if (!disp_rst_n) begin sub_on_s1 <= 1'b0; sub_on_s2 <= 1'b0; end
+        else             begin sub_on_s1 <= sub_loaded; sub_on_s2 <= sub_on_s1; end
+    end
+
     stub_ctrl #(
         .CLK_HZ(50_000_000), .AUTO_DELAY_MS(100), .RST_HOLD_MS(5),
         .SLOT_BASE(0), .AUTO_START(CTL_AUTO_START)
@@ -757,7 +771,11 @@ module top_m2 #(
         .dbg_overrun(a_dbg_overrun), .dbg_warn_odd(a_dbg_warn_odd),
         .dbg_first_addr(a_dbg_first_addr),
         .wav_done(a_wav_done), .dbg_wav_cnt(a_dbg_wav_cnt),
-        .dbg_scaled(a_dbg_scaled), .dbg_wav_odd(a_dbg_wav_odd)
+        .dbg_scaled(a_dbg_scaled), .dbg_wav_odd(a_dbg_wav_odd),
+        // ★★ 2026-10-09 字幕链的诊断（上板看不到字，靠这三个数定位）
+        .dbg_sub_wr_cnt(a_dbg_sub_wr_cnt),
+        .dbg_sub_overrun(a_dbg_sub_overrun),
+        .dbg_sub_short(a_dbg_sub_short)
     );
 
 
@@ -1291,21 +1309,19 @@ module top_m2 #(
         end
     end
 
-    // ★★ 用【官方 frame_read_write 的读侧】来读 256 个字并逐字比对：
-    //    写侧全部挂起（我们不用它写，写口还是自己的 sdr_arb，因为要半字写）
-    vendor_read_test #(
-        .BASE(21'h10400), .NWORD(256)
-    ) u_selftest (
-        .clk_mem(clk_sdr), .clk_pix(clk_pix), .rst_pix_n(sys_rst_n),
-        .go(st_go),
-        .sdr_init_done(sdr_init_done), .sdr_init_ref_vld(1'b0), .sdr_busy(sdr_busy),
-        .App_rd_en(st_rd_en), .App_rd_addr(st_rd_addr),
-        .Sdr_rd_en(rd_vld), .Sdr_rd_dout(rd_data),
-        .o_got(st_read_cnt), .o_bad(st_bad),
-        .o_first(st_first), .o_off(st_off),
-        .o_w0(st_w0), .o_w1(st_w1), .o_w2(st_w2), .o_w3(st_w3),
-        .o_done(st_done), .busy(st_busy)
-    );
+    // ======================================================================
+    //  ★★★ 2026-10-09【集成临时改动 · 省面积】**删掉读口自检 u_selftest**
+    //    （`vendor_read_test` + 它内部的 `frame_read_write` 两颗 FIFO，共 ~285 LUT）
+    //  · 它从 **2026-09-28** 起就**没有任何作用**了：读口当时已经"完全交给显示"，
+    //    顶层把它的输出打桩成 0（`st_rd_en_m/st_rd_addr_m` = 0，见上面那一行），
+    //    `st_go` 拉高也读不到任何东西 —— 属于纯挂着的死逻辑。
+    //  · 它的 8 个输出里，只有 `st_bad` 还进串口（另外几格早被写侧镜像/转场探针占掉了）。
+    //    ⇒ 这里把 `st_bad` 直接接 0（`st_bad`/`st_first` 那两格在转场探针模式下本来就不看）。
+    //  ★ 要恢复：把这段例化放回来、并把下面那行 assign 删掉。
+    //    例化原文在 git 历史里（`git show 651aa6a:rtl/top_m2.v`，搜 vendor_read_test）。
+    // ======================================================================
+    assign st_bad  = 16'd0;
+    assign st_busy = 1'b0;      // 串口 flags 的 bit12 用它（自检都没了，恒 0）
 
     // ============================================================
     //  4. 描述符接收侧（A 写 → B 每帧读）
@@ -1495,7 +1511,7 @@ module top_m2 #(
         .tr_may_load(tr_may_load), .tr_active(tr_active), .tr_swap(tr_swap),
         .tr_show_back(tr_show_back),
         // ★★★ 2026-10-08【字幕叠加】：先给暂定位置；以后换成 C 的 WIN_SUB 那一行
-        .sub_on(sub_loaded),
+        .sub_on(sub_on_s2),          // ★ 50 MHz 域 → 像素域，过了两位同步器
         .sub_x0(SUB_X0_DFLT), .sub_y0(SUB_Y0_DFLT),
         .sub_w(SUB_W_DFLT), .sub_h(SUB_H_DFLT),
         .sub_base(SUB_BASE), .sub_ink(SUB_INK),
@@ -1728,6 +1744,8 @@ module top_m2 #(
             sub_loaded     <= 1'b0;
             sub_fail       <= 1'b0;
             sub_wait       <= 26'd0;
+            sub_pulse_lat  <= 1'b0;
+            sub_done_lat   <= 1'b0;
         end
         else begin
             sub_load_pulse <= 1'b0;
@@ -1744,6 +1762,7 @@ module top_m2 #(
                 if (!tr_active && !a_busy && !req_pend_w && !aud_load_pulse) begin
                     if (sub_wait >= 26'd25_000_000) begin      // 0.5 s @50MHz
                         sub_load_pulse <= 1'b1;
+                        sub_pulse_lat  <= 1'b1;                // ★ 探针：脉冲发出去过
                         sub_wait       <= 26'd0;
                         sub_st         <= 2'd2;
                     end
@@ -1754,6 +1773,7 @@ module top_m2 #(
             2'd2: begin
                 if (a_sub_done) begin
                     sub_loaded <= 1'b1;
+                    sub_done_lat <= 1'b1;                      // ★ 探针：A 报"装完了"
                     sub_st     <= 2'd3;
                 end
                 // ★ 等 40 ms 之后再信 a_fail：`a_fail` 是三条链**合并**的出错口，
@@ -1919,7 +1939,12 @@ module top_m2 #(
         .lb_wbase(lb_wbase0[15:0]), .lb_rd0(lb_rd0[15:0]),
         .lb_rd1(lb_rd1[15:0]),      .lb_words({4'd0, lb_words0}),
         // ★ 逐字对齐校验：第 1 个字偏几个 / 本趟几个字不对（0 = 逐字全对）
-        .lb_off(lb_off), .lb_alignbad(lb_alignbad),
+        //   ★★ 2026-10-09【临时占用 · 查字幕】：这两个口只在"地址图"模式下有意义
+        //      （现在屏上是真照片 ⇒ 它们的读数本来就没意义），先借来报字幕：
+        //        字段 19 = 字幕叠加"取回来多少行"（>0 就说明叠加真在跑、真在读 SDRAM）
+        //        字段 20 = A 报"这条字幕写了多少个字"（期望 1600 = 0640）
+        //      查完字幕再换回 lb_off / lb_alignbad。
+        .lb_off(sub_row_cnt), .lb_alignbad(a_dbg_sub_wr_cnt[15:0]),
         // ★ 测试旋钮：当前在途上限档位 / key1 按了多少次
         // ★ M2：字段 29（原 cmp_sel）现在报【当前缩放档 0..5】；字段 30 是 KEY1 按了几次
         .cmp_sel({13'd0, zoom_lv}), .key_cnt({12'd0, key_cnt}),
@@ -1938,7 +1963,12 @@ module top_m2 #(
         //   高 8 位：bit7=fail bit6=loaded bit5=音频PLL锁 bit4=busy
         //            bit3=有音频数据流 bit2=play_tgl 在翻 bit1:0=状态机(0等图/1等待/2装载/3做完)
         .st_w3({aud_fail, aud_loaded, pll_aud_locked, aud_busy_w,
-                aud_dbg_vld, aud_dbg_play_tgl, aud_st, 8'd0}),
+                aud_dbg_vld, aud_dbg_play_tgl, aud_st,
+                // ★★★ 2026-10-09【字段 28 的低 8 位改成字幕状态】（高 8 位音频一字未动）
+                //   bit7 sub_loaded(装好了) bit6 sub_fail(失败) bit5 脉冲发过
+                //   bit4 a_sub_done 回来过 bit3 sub_overrun bit2 sub_short bit1:0 sub_st
+                sub_loaded, sub_fail, sub_pulse_lat, sub_done_lat,
+                a_dbg_sub_overrun, a_dbg_sub_short, sub_st}),
         // ★★ 2026-10-04：字段 25..28 从 M1 时代的扫描字 px4..px7 改成【写侧镜像】：
         //    25 = 引擎写字拍数(低16) / 26 = 突发次数 / 27 = 读写同拍拍数 / 28 = A 的段长度(低5)
         // ★★ 2026-10-01 实验一：SDRAM 忙 / 刷新 与写使能
