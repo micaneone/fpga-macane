@@ -89,7 +89,17 @@ module subtitle_ovl (
     localparam integer SUB_WORDS = 1600;                 // 25 字/行 × 64 行
     localparam [11:0]  WPR       = 12'd25;               // 每行 25 个字
     localparam [10:0]  LAST_W    = 11'd1599;
-    localparam [20:0]  WLEN      = 21'd1600;
+    // ★★★ 2026-10-09【2 字偏移补偿 —— 和 line_buf 的 RD_EXTRA/RD_SKIP 同一口径】：
+    //   写进 SDRAM 的那批数据**整体晚 2 个字**（4 个像素）（见 `规划\A轨待改清单.md`
+    //   第七节 / 第十节的 10.4；显示那条链一直靠 line_buf 的 2 字补偿顶着）。
+    //   字幕这条链以前**没补** ⇒ 上板实测：整条字幕往右挪 2 个字 = **64 像素**
+    //   （1bpp：1 个字 = 32 个像素）⇒ 字看着"错位/斜着"。
+    //   ⇒ 现在：**多要 2 个字**，收的时候**丢掉本趟头 2 个**，剩下的 1600 个正好是字幕。
+    //   ★ 口径和 line_buf 一模一样：`缓冲第 j 个字 = 存储第 (base + 2 + j) 个字`；
+    //     以后 A 把装载机的偏移修好了，把 RD_EXTRA 改回 0 即可（一行）。
+    localparam [11:0]  RD_EXTRA  = 12'd2;                // 多要几个字（= 要丢的那几个）
+    localparam [20:0]  WLEN      = 21'd1602;             // 一共取回多少字（含要丢的 2 个）
+    localparam [11:0]  RD_SKIP   = 12'd2;                // 丢掉本趟收到的头几个字
 
     // ============================================================
     //  片上字幕 RAM（1600×32 = 51,200 比特）
@@ -123,6 +133,7 @@ module subtitle_ovl (
     reg  [1:0]  fst;
     reg         m_req, m_next;
     reg  [10:0] wcnt;
+    reg  [11:0] rcnt;            // ★ 本趟【收到】了几个字（含要丢掉的那 RD_SKIP 个）
 
     assign mem_req  = m_req;
     assign mem_base = sub_base;      // ★ 常数，直接给（顶层就是 SUB_BASE）
@@ -135,6 +146,7 @@ module subtitle_ovl (
             m_req     <= 1'b0;
             m_next    <= 1'b0;
             wcnt      <= 11'd0;
+            rcnt      <= 12'd0;
             ft1       <= 1'b0;
             ft2       <= 1'b0;
             ft3       <= 1'b0;
@@ -149,25 +161,32 @@ module subtitle_ovl (
                 if (fetch_start) begin
                     m_req <= 1'b1;
                     wcnt  <= 11'd0;
+                    rcnt  <= 12'd0;
                     fst   <= F_GNT;
                 end
             end
             F_GNT: begin
                 if (mem_gnt) begin
                     wcnt <= 11'd0;
+                    rcnt <= 12'd0;
                     fst  <= F_COLL;
                 end
             end
             F_COLL: begin
-                m_next <= (wcnt <= LAST_W);
-                if (mem_dv && (wcnt <= LAST_W)) begin
-                    cmem[wcnt] <= mem_data;                  // ★ 写侧（clk_mem）
-                    wcnt       <= wcnt + 11'd1;
-                    if (wcnt == LAST_W) begin
-                        if (o_row_cnt != 16'hFFFF) o_row_cnt <= o_row_cnt + 16'd1;
+                // ★ 一直要字，直到 WLEN（= 1600 + RD_EXTRA）个字都到手
+                m_next <= (rcnt < WLEN[11:0]);
+                if (mem_dv && (rcnt < WLEN[11:0])) begin
+                    rcnt <= rcnt + 12'd1;
+                    // ★★★ 头 RD_SKIP 个字丢掉（那 2 个字是写通路"晚 2 个字"留下的）
+                    if (rcnt >= RD_SKIP) begin
+                        if (wcnt <= LAST_W) cmem[wcnt] <= mem_data;  // ★ 写侧（clk_mem）
+                        wcnt <= wcnt + 11'd1;
+                        if (wcnt == LAST_W) begin
+                            if (o_row_cnt != 16'hFFFF) o_row_cnt <= o_row_cnt + 16'd1;
+                        end
                     end
                 end
-                if ((wcnt > LAST_W) || mem_fin) begin
+                if ((rcnt >= WLEN[11:0]) || mem_fin) begin
                     m_req  <= 1'b0;
                     m_next <= 1'b0;
                     fst    <= F_IDLE;

@@ -206,13 +206,25 @@ module aud_blk_rd #(
 
             // ---- ② 收数据：一个 a_dv 一个字 ----
             //   ★ 命令那一拍不收（避免和上面的清零打架）
+            // ★★★ 2026-10-09【关键修复·原厂读通路的 2 字偏移】：
+            //   `blk_rd_arb` 那边明写着「原厂读 FIFO 是 read_en 之后【下一拍】才出数据」，
+            //   而官方读控制器每次受理 read_req 时会把 FIFO 清一次 —— 清完的头 2 拍
+            //   吐出来的是**没更新过的旧 dout**（管线残留）。显示那条链靠
+            //   `line_buf` 的 `RD_EXTRA=2 / RD_SKIP=2` 抵掉（多读 2 个字、丢头 2 个）。
+            //   ★ 我们这条音频链以前**没抵** ⇒ 每 64 字一块里，**头 2 个字是垃圾、
+            //     尾巴丢 2 个字** ⇒ 每 64 字（≈1.33 ms）一次咔哒 ⇒ **听起来就是一片
+            //     沙沙/嗡嗡声**（正是用户报的"全是沙沙声"）。上板指纹也印证了：
+            //     字幕整条挪了 2 个字。
+            //   ⇒ 现在：请求 [目标字数 + 2]，收的时候**丢掉前 2 个**。
             if (a_dv && !a_play_pulse) begin
-                afifo[awp[AFIFO_AW-1:0]] <= a_data;
-                awp                      <= awp + 1'b1;
-                got                      <= got + 21'd1;
-                wait_cnt                 <= 16'd0;
-                if (dbg_cnt != 16'hFFFF) dbg_cnt <= dbg_cnt + 16'd1;
-                dbg_sum                  <= dbg_sum + a_data;
+                if (got >= 21'd2) begin                  // ★ 头 2 个字扔掉
+                    afifo[awp[AFIFO_AW-1:0]] <= a_data;
+                    awp                      <= awp + 1'b1;
+                    if (dbg_cnt != 16'hFFFF) dbg_cnt <= dbg_cnt + 16'd1;
+                    dbg_sum                  <= dbg_sum + a_data;
+                end
+                got      <= got + 21'd1;
+                wait_cnt <= 16'd0;
             end
             else if (wait_cnt != 16'hFFFF) wait_cnt <= wait_cnt + 16'd1;
 
@@ -224,7 +236,8 @@ module aud_blk_rd #(
                 if (run && (issued < a_words_r)) begin
                     if (room_now) begin
                         a_base  <= a_base_r + issued;
-                        a_len   <= next_len;
+                        // ★★★ 多要 2 个字：原厂读通路受理后会先吐 2 个残留字（见上面 ② 的说明）
+                        a_len   <= next_len + 21'd2;
                         cur_len <= next_len;
                         a_req_r <= 1'b1;
                         wait_cnt<= 16'd0;
@@ -247,7 +260,8 @@ module aud_blk_rd #(
             end
             // ---- 收这一块（a_next 恒 1，见文件头安全设计②）----
             S_COL: begin
-                if (a_dv && !a_play_pulse && ((got + 21'd1) >= cur_len)) begin
+                // ★ 收够 [目标字数 + 2]（那 2 个是残留字）才算这一块收完
+                if (a_dv && !a_play_pulse && ((got + 21'd1) >= (cur_len + 21'd2))) begin
                     issued <= issued + cur_len;
                     st     <= S_IDLE;
                 end
@@ -255,7 +269,8 @@ module aud_blk_rd #(
                     // ★ 看门狗：这一块收不齐了。已经收的先认账，剩下的跳过；
                     //   仲裁器那边的看门狗会把读口放回去（绝不会堵死显示）。
                     o_stall <= 1'b1;
-                    issued  <= issued + got;
+                    // ★ 计入的是"真正收进 FIFO 的字数"（要减掉那 2 个残留字）
+                    issued  <= issued + ((got > 21'd2) ? (got - 21'd2) : 21'd0);
                     a_req_r <= 1'b0;
                     st      <= S_IDLE;
                 end
