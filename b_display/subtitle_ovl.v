@@ -80,7 +80,14 @@ module subtitle_ovl (
     //     和串口这两个数一比：**对上 ⇒ 片上数据是对的**（问题在显示级）；对不上 ⇒ 数据级。
     output reg  [15:0] o_sum16,
     output reg  [10:0] o_nz,
-    output reg         o_nz_v
+    output reg         o_nz_v,
+    // ★★★ 2026-10-11【一次性调试 · 把字幕 RAM 逐字倒出来】：
+    //   自检扫描每跑完一遍，就顺手发布 **第 dp 个字**（下标 0..1599）和它的值，
+    //   dp 每次 +1。顶层把这两格接到串口（字段 21/22/25），配上"每 16 ms 一条帧"
+    //   就能把整条字幕 RAM **一个字不落地**取回来，和电脑上的模型逐字比对。
+    //   ★ 位置/显示都不受影响（扫描本来就是在垂直消隐里跑的）
+    output reg  [10:0] o_dump_idx,
+    output reg  [31:0] o_dump_word
 );
 
     // ============================================================
@@ -223,6 +230,8 @@ module subtitle_ovl (
     reg  [31:0] sc_sum;
     reg         sc_nz_v;
     reg  [10:0] sc_nz;
+    reg  [10:0] dp;                  // ★ 抓字指针（每扫完一遍 +1，0..1599 循环）
+    reg  [31:0] dump_w;              // ★ 这一遍抓到的那个字
     reg         fd1, fd2, fd3;       // clk_mem 的"取完了"toggle → 像素域三级同步
     wire [10:0] rd_addr = sc_run ? ((sc_idx > 12'd1599) ? 11'd1599 : sc_idx[10:0])
                                  : widx;
@@ -236,6 +245,8 @@ module subtitle_ovl (
             de_1 <= 1'b0; vs_1 <= 1'b0; x_1 <= 12'd0; y_1 <= 12'd0; px_1 <= 16'd0;
             sc_idx <= 12'd0; sc_run <= 1'b0; sc_sum <= 32'd0;
             sc_nz_v <= 1'b0; sc_nz <= 11'd0;
+            dp <= 11'd0; dump_w <= 32'd0;
+            o_dump_idx <= 11'd0; o_dump_word <= 32'd0;
             fd1 <= 1'b0; fd2 <= 1'b0; fd3 <= 1'b0;
             o_sum16 <= 16'd0; o_nz <= 11'd0; o_nz_v <= 1'b0;
         end
@@ -261,12 +272,18 @@ module subtitle_ovl (
                         sc_nz_v <= 1'b1;
                         sc_nz   <= sc_idx - 12'd1;
                     end
+                    // ★★★ 2026-10-11 调试：正好走到第 dp 个字 ⇒ 把它记下来
+                    if ((sc_idx - 12'd1) == {1'b0, dp}) dump_w <= rd_q;
                 end
                 if (sc_idx >= 12'd1600) begin
                     sc_run  <= 1'b0;
                     o_sum16 <= sc_sum[15:0];
                     o_nz    <= sc_nz;
                     o_nz_v  <= sc_nz_v;
+                    // ★ 发布这一遍抓到的字，然后指针 +1（下一遍抓下一个字）
+                    o_dump_idx  <= dp;
+                    o_dump_word <= dump_w;
+                    dp <= (dp == 11'd1599) ? 11'd0 : (dp + 11'd1);
                 end
                 else sc_idx <= sc_idx + 12'd1;
             end

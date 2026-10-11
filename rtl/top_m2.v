@@ -1050,6 +1050,8 @@ module top_m2 #(
     wire [15:0] sub_sum16;           // ★ 指纹：片上字幕 RAM 求和低 16
     wire [10:0] sub_nz;              // ★ 指纹：第一个非零字下标
     wire        sub_nz_v;
+    wire [10:0] sub_dump_idx;        // ★ 2026-10-11 调试：逐字倒出的下标
+    wire [31:0] sub_dump_word;       // ★ 2026-10-11 调试：逐字倒出的那个字
     wire [31:0] blk_d_data;
 
     vendor_rd_path u_vrd (
@@ -1536,6 +1538,7 @@ module top_m2 #(
         .s_blk_dv(o_blk_dv[2]), .s_blk_data(sub_blk_data), .s_blk_fin(sub_blk_fin),
         .o_sub_row_cnt(sub_row_cnt), .o_sub_hit(sub_hit),
         .o_sub_sum16(sub_sum16), .o_sub_nz(sub_nz), .o_sub_nz_v(sub_nz_v),
+        .o_sub_dump_idx(sub_dump_idx), .o_sub_dump_word(sub_dump_word),
         .win_on(win_on),
         .win_x0(win_x0), .win_y0(win_y0), .win_w(win_w), .win_h(win_h),
         .step_q16(z_a_step), .off_u_q16(z_a_offu), .off_v_q16(z_a_offv),
@@ -1937,7 +1940,10 @@ module top_m2 #(
     };
 
     dbg_report #(
-        .CLK_HZ(50_000_000), .PERIOD_MS(200)      // ★ 测量版：快一点（200ms 一帧）
+        // ★★★ 2026-10-11【调试临时改动】：PERIOD_MS 200 → 16（≈ 一帧一条），
+        //   这样"字幕逐字倒出"的指针每加一次都能被采到一次（一个字不落）。
+        //   查完改回 200。
+        .CLK_HZ(50_000_000), .PERIOD_MS(16)
     ) u_dbg (
         .clk(clk), .rst_n(sys_rst_n),
         .val(sdr_wr_cnt),               // ★ W 改成"存储封装一共交接了多少字"
@@ -1970,14 +1976,18 @@ module top_m2 #(
         // ★★ 2026-09-28 第四轮：这四个字段改接"整行扫描组号 + 第一个错像素的位置/值"
         //    （A 那几个诊断数在自测图模式下本来就没有意义，出图版要的话改回来即可）
         // ★ 第六轮：边缘巡检 —— 字段 21..24 = 组号 / 趟号 / 奇偶 / 看的窗口行
-        .st_read_cnt({10'd0, px_grp}),           // 字段21：这一趟里的第几组（0..39）
-        .st_bad({13'd0, pass_i}),                // 字段22：第几趟（0..5，见上面注释表）
+        // ★★★ 2026-10-11【调试临时占用】：字段 21 = 字幕 RAM 逐字倒出的**下标**，
+        //   字段 22 = 那个字的**低 16 位**，字段 25 = 那个字的**高 16 位**。
+        //   配合 PERIOD_MS=16（≈ 一帧一条）就能把整条字幕 RAM 一个字不落地取回来。
+        //   查完改回：字段21/22 = px_grp/pass_i，字段25 = wr_beats。
+        .st_read_cnt({5'd0, sub_dump_idx}),      // 字段21：倒到第几个字
+        .st_bad(sub_dump_word[15:0]),            // 字段22：这个字的低 16 位
         // ★ 第六轮：字段 23/24 改接【A 请求的长度 a_wr_len】—— "一帧最后 256 个字
         //   没写进 SDRAM"到底是 A 请求短了、还是引擎少写了一段，看
         //   字段 0/1（引擎实写字数）+ 字段 11（A 自己推的字数）+ 这两个数就能定死。
         .st_off(a_wr_len[15:0]),                 // 字段23：A 请求的长度低 16 位
         .st_first({11'd0, a_wr_len[20:16]}),     // 字段24：A 请求的长度高位
-        .st_w0(wr_beats), .st_w1(wr_bursts), .st_w2(clash_cyc),
+        .st_w0(sub_dump_word[31:16]), .st_w1(wr_bursts), .st_w2(clash_cyc),   // 字段25：这个字的高 16 位
         // ★★ 2026-10-05：字段 28 从"固定 0"改成【音频链状态位图】
         //   高 8 位：bit7=fail bit6=loaded bit5=音频PLL锁 bit4=busy
         //            bit3=有音频数据流 bit2=play_tgl 在翻 bit1:0=状态机(0等图/1等待/2装载/3做完)
