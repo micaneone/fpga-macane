@@ -63,6 +63,17 @@ module blk_rd_arb #(
     //   有它才敢"边填边取"：**没字就不发 read_en**（否则取到空 FIFO 是脏数据）。
     //   也因此不用"等整块读完"，1536 宽的一行 771 字一块就够。
     input  wire        rd_used_nz,         // FIFO 非空
+    // ★★★ 2026-10-11【交付必须认官方 FIFO 的 valid】：`rd_used_nz`（读侧计数）里
+    //   `rd_addr` 要等 pop 的**下一拍**才更新 ⇒ 当 FIFO 只剩 1 个字时，仲裁器会在
+    //   "计数还没来得及减"的那一拍**再取一次**，而 FIFO 那一拍已经空了
+    //   （`rd_en_s = !empty & re` 被挡掉）⇒ **pop 丢空、dout 还是旧字**，我们却把它
+    //   当成了一次交付 ⇒ **同一个字交付两遍**，之后整条流后移一个字。
+    //   上板实测（§28）：每 ~128 个字（= 官方一个读突发）重复一个字 ⇒ 字幕每 ~5 行
+    //   错 32 像素（"斜着的黑块"）、音频每 ~128 字多一个采样（沙沙）、照片每 256 像素
+    //   一条 2 像素竖缝（看不见）。
+    //   ⇒ 现在交付改成**认 `rd_valid`**（官方 FIFO 的 "这一次 pop 真的成功了"），
+    //     并且**只有真的交付出去的字才计数**。丢空的 pop 不再被误算。
+    input  wire        rd_dv,              // = vendor_rd_path 的 rd_valid
     // ★★★ 2026-10-09【短块收尾修正】：官方读控制器"读指令进行中"（= vendor_rd_path 的 o_rd_busy）
     //   为什么要它：S_TAIL 原来只等 `rd_fin`，而官方那条 `read_finish` **只亮一拍**。
     //   长块（显示一行 300~800 字）没问题，可**短块**（字幕 25 字 / 音频 64 字）
@@ -164,7 +175,10 @@ module blk_rd_arb #(
     end
     // ★ 取数条件：① 在服务中 ② 申请方这一拍要字 ③ 还没取够 ④ **FIFO 里确实有字**
     wire        take_ok  = (st == S_SERV) && cur_next && (take_cnt < blk_len) && rd_used_nz;
-    wire        take_last = take_ok && (take_cnt + 21'd1 >= blk_len);
+    // ★★★ 2026-10-11：**交付/计数都改成认 `rd_dv`**（见端口那段注释）。
+    //   `take_ok` 仍然只是"我要一个字"（它驱动 rd_en，丢空的 pop 无害）；
+    //   真正算数的只有 `rd_dv`。
+    wire        take_last = rd_dv && (take_cnt + 21'd1 >= blk_len);
 
     // ============================================================
     //  一、主状态机
@@ -198,8 +212,8 @@ module blk_rd_arb #(
             a_done <= 1'b0;
             s_done <= 1'b0;
             take_dv_r <= take_ok;          // ★ 唯一赋值处
-            // ---- 看门狗计数：这一拍取走一个字就清零，否则累加 ----
-            if (take_ok)                       serv_cnt <= 14'd0;
+            // ---- 看门狗计数：这一拍**真的交付**了一个字就清零，否则累加 ----
+            if (rd_dv)                         serv_cnt <= 14'd0;
             else if (serv_cnt != 14'h3FFF)     serv_cnt <= serv_cnt + 14'd1;
 
             case (st)
@@ -271,7 +285,7 @@ module blk_rd_arb #(
             // ---- 授权中：申请方逐字取；取满 blk_len 就收尾 ----
             S_SERV: begin
                 rd_en <= take_ok;                       // 取一个字（数据下一拍回来）
-                if (take_ok) take_cnt <= take_cnt + 21'd1;
+                if (rd_dv) take_cnt <= take_cnt + 21'd1;  // ★ 只按【真的交付】计数
                 if (take_last) begin
                     // ★★★ 2026-10-06【必须在这里就撤授权】：
                     //   这一块的字**已经全部交付完了**，但官方的 read_finish 还要
@@ -362,7 +376,10 @@ module blk_rd_arb #(
     assign s_data = rd_data;               // ★ 2026-10-08：字幕也是同一条出口
 
     // ★★★ 交付脉冲：一根 3 位线，bit0 = 显示、bit1 = 音频、bit2 = 字幕。
-    //   用【打两拍】的 take_d2（= dout 真的有效那一拍），和组合引出的数据天然对齐。
-    assign o_dv = take_d2 ? (3'b001 << owner_d2) : 3'b000;
+    //   ★ 2026-10-11 改成认官方 FIFO 的 `rd_dv`（rd_valid）：它亮的那一拍 dout 就是
+    //     这一次 pop 真的取到的字（valid = re_r1 & !empty_flag_r1，和 dout 同拍）。
+    //     丢空的 pop 不再产生交付 ⇒ 不会再"一个字交付两遍"。
+    //     owner_d1 = 那次 pop 的所有者（pop 在 C 拍，valid 在 C+1 拍）。
+    assign o_dv = rd_dv ? (3'b001 << owner_d1) : 3'b000;
 
 endmodule

@@ -1025,7 +1025,7 @@ module top_m2 #(
     //      · 读口 sdr_rd_en/sdr_rd_addr 由 vendor_rd_path 驱动（sdram 那两行不用改）
     //      · 读写互斥仍靠 disp_rd_gate（装载期间不许发块请求）
     // ============================================================
-    wire        vrd_ack, vrd_fin, vrd_used_nz, vrd_busy;
+    wire        vrd_ack, vrd_fin, vrd_used_nz, vrd_busy, vrd_valid;
     wire [31:0] vrd_dout;
     wire [9:0]  vrd_used;                  // ★ 探针：FIFO 现在几个字
     wire [15:0] vrd_rd_en_cnt;             // ★ 探针①：官方控制器发过多少次 App_rd_en
@@ -1075,7 +1075,7 @@ module top_m2 #(
         // 取数
         .rd_re            (blk_rd_re),
         .rd_dout          (vrd_dout),
-        .rd_valid         (),
+        .rd_valid         (vrd_valid),
         .rd_used          (vrd_used),
         .rd_used_nz       (vrd_used_nz),
         .o_rd_busy        (vrd_busy),
@@ -1091,6 +1091,8 @@ module top_m2 #(
         .rd_base        (blk_rd_base), .rd_len(blk_rd_len),
         .rd_en          (blk_rd_re), .rd_data(vrd_dout),
         .rd_used_nz     (vrd_used_nz),
+        // ★★★ 2026-10-11：交付认官方 FIFO 的 valid（见 blk_rd_arb 文件头）
+        .rd_dv          (vrd_valid),
         // ★★ 2026-10-09：短块收尾要用"官方还忙不忙"来判（漏掉一拍宽的 read_finish 时
         //   不再死等到看门狗 —— 那一下会把显示/音频的读口卡 65 µs）
         .rd_busy        (rd_busy_w),
