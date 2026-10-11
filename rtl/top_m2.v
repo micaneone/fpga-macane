@@ -275,8 +275,14 @@ module top_m2 #(
     //   ★ 偏移 1000：mus0.wav 的第一个"有声"字在第 1128 个、mus1.wav 在第 2571 个
     //     ⇒ 取 [1000, 2600) 这一段正好把**两条 WAV 的起音**都包进来（前面应当是一串 0）。
     //   ★ 字段 19/20 = 这段的"和 / 第一个非零字"，字段 21/22/25 = 逐字倒出。
-    //   ★ 查完把下面三行改回：SUB_BASE = 2085760、SUB_Y0_DFLT = 528（SUB_W/H 不用动）。
-    localparam [20:0] SUB_BASE   = 21'd2042660;   // = SDR_AUDIO_BASE(2041660) + 1000
+    //   ★★★ 2026-10-11 修正：**上一版把基址搞错了** —— `SUB_BASE` 是"装载**写**"和
+    //     "取数**读**"**共用**的（顶层 a_sub_base 与 disp_top.sub_base 都用它），
+    //     所以改它等于把 .SUB 写到了音频区、把音频数据盖掉（串口倒出来就是字幕遮罩）。
+    //   ⇒ 现在拆成两个：**装载写**仍旧用 SUB_BASE（字幕区，不动）；
+    //     **取数读**用下面这个 SUB_FETCH_BASE（音频区）—— 只改"读"。
+    //   ★ 查完把 SUB_FETCH_BASE 改回 2085760、SUB_Y0_DFLT 改回 528 即可。
+    localparam [20:0] SUB_BASE       = 21'd2085760;   // 契约 SDR_SUBTITLE_BASE（装载写这里）
+    localparam [20:0] SUB_FETCH_BASE = 21'd2042660;   // ★ 诊断：取数读这里 = SDR_AUDIO_BASE + 1000
     localparam [3:0]  SUB_SKIP   = 4'd0;          // 卡里第 1 个 .SUB（在自己的扩展名里数）
     // 暂定位置：800×64 的字幕条贴在屏幕底部（y = 600 - 64 - 8 = 528）、横向居中
     localparam [11:0] SUB_X0_DFLT = 12'd0;
@@ -1543,7 +1549,7 @@ module top_m2 #(
         .sub_on(sub_on_s2),          // ★ 50 MHz 域 → 像素域，过了两位同步器
         .sub_x0(SUB_X0_DFLT), .sub_y0(SUB_Y0_DFLT),
         .sub_w(SUB_W_DFLT), .sub_h(SUB_H_DFLT),
-        .sub_base(SUB_BASE), .sub_ink(SUB_INK),
+        .sub_base(SUB_FETCH_BASE), .sub_ink(SUB_INK),   // ★ 诊断：取数读音频区（见上面注释）
         .sub_tpat(SUB_TPAT),
         .s_blk_req(sub_blk_req), .s_blk_base(sub_blk_base), .s_blk_len(sub_blk_len),
         .s_blk_gnt(sub_blk_gnt), .s_blk_next(sub_blk_next),
