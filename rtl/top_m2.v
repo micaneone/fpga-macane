@@ -288,13 +288,15 @@ module top_m2 #(
     //     **取数读**用下面这个 SUB_FETCH_BASE（音频区）—— 只改"读"。
     //   ★ 查完把 SUB_FETCH_BASE 改回 2085760、SUB_Y0_DFLT 改回 528 即可。
     localparam [20:0] SUB_BASE       = 21'd2041660;   // ★ v9 契约 SDR_SUBTITLE_BASE（装载写这里）
-    // ★★★ 2026-10-11 v9：诊断结束（音频那条已经由"契约变更"解决，见上面 SFX_BASE 那段）。
-    //   探针不再另指地址，读写统一用契约的字幕区基址。
-    localparam [20:0] SUB_FETCH_BASE = SUB_BASE;
+    // ★★★ 2026-10-11【契约 v9 之后的第二次诊断】：音频区和小槽区已经分开了，
+    //   现在倒一次**音频区**（第 1000 个字起）确认那里装的是不是 WAV 的采样：
+    //   mus0.wav 开头 1128 个字是静音、之后才起音 ⇒ 期望"约 128 个 0 + 起音"。
+    //   （读这条路是逐字验证过的；叠加位置在屏幕外，屏上不会多画东西。）
+    localparam [20:0] SUB_FETCH_BASE = 21'd1862660;   // = SDR_AUDIO_BASE(1861660) + 1000
     localparam [3:0]  SUB_SKIP   = 4'd0;          // 卡里第 1 个 .SUB（在自己的扩展名里数）
     // 暂定位置：800×64 的字幕条贴在屏幕底部（y = 600 - 64 - 8 = 528）、横向居中
     localparam [11:0] SUB_X0_DFLT = 12'd0;
-    localparam [11:0] SUB_Y0_DFLT = 12'd528;      // 贴底居中（v9 恢复）
+    localparam [11:0] SUB_Y0_DFLT = 12'd1000;     // ★ 诊断：叠加挪到屏幕外，别在屏上画噪声
     localparam [11:0] SUB_W_DFLT  = 12'd800;      // 契约 ART_SUB_W
     localparam [11:0] SUB_H_DFLT  = 12'd64;       // 契约 ART_SUB_H
     localparam [15:0] SUB_INK     = 16'h0000;     // ★ bit=1 画这个颜色（黑 = 文字）
