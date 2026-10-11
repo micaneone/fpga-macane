@@ -115,12 +115,21 @@ module aud_blk_rd #(
     integer     ci;
     // ★ 抓字读口（纯组合，给顶层按索引取值）—— 必须在 cap 声明之后
     assign cap_dout = cap[cap_sel];
-    // ★★★ 2026-10-11：从第几个字开始抓（0 基）。**不能用 0** ——
-    //   卡上 mus0.wav 开头 1.3 ms 是静音（前 64 个采样全 0），抓头 32 个字全是 0 没用。
-    //   2000 这个位置（= 采样 4000..4063，83 ms）落在音乐最响的那一段（rms≈6700，max≈23700），
-    //   任何字节序/打包错误在这里都一目了然；而且 32 个字可以和卡上 WAV 逐字对。
-    localparam [20:0] CAP_START = 21'd2000;
-    reg [20:0] wcnt_all;                    // 本次播放一共收了多少个字（不饱和）
+    // ★ 抓字触发条件（任一 16bit 半字幅度 > CAP_TH）—— 具体表达式在 CAP_TH 声明之后
+    wire signed [15:0] cap_h0;
+    wire signed [15:0] cap_h1;
+    wire cap_hit;
+    // ★★★ 2026-10-11【抓字触发】：从**第一个"真正的音乐"字**开始抓 32 个。
+    //   为什么不能用固定下标：卡上 mus0.wav 开头 1.3 ms 是静音（前 32 个字全 0），
+    //   而 mus1.wav 的开头更久 —— 固定下标抓到的可能全是 0，什么也判不出来。
+    //   ⇒ 触发 = 任一 16bit 半字的幅度 > 1024（跳过静音和淡入）。
+    localparam signed [15:0] CAP_TH = 16'sd1024;
+    reg         cap_go;                     // 触发过就一直抓
+    reg [20:0]  wcnt_all;                   // 本次播放一共收了多少个字（不饱和）
+    assign cap_h0 = a_data[15:0];
+    assign cap_h1 = a_data[31:16];
+    assign cap_hit = (cap_h0 > CAP_TH) || (cap_h0 < -CAP_TH) ||
+                     (cap_h1 > CAP_TH) || (cap_h1 < -CAP_TH);
     reg  [20:0] cur_len;                    // 当前这一块要多少字
     reg  [15:0] wait_cnt;                   // 看门狗
 
@@ -209,6 +218,7 @@ module aud_blk_rd #(
             o_stall     <= 1'b0;
             cap_cnt     <= 6'd0;
             wcnt_all    <= 21'd0;
+            cap_go      <= 1'b0;
             for (ci = 0; ci < 32; ci = ci + 1) cap[ci] <= 32'd0;
         end
         else begin
@@ -225,6 +235,7 @@ module aud_blk_rd #(
                 dbg_sum   <= 32'd0;
                 cap_cnt   <= 6'd0;      // ★ 每次播放重新抓头 32 个字
                 wcnt_all  <= 21'd0;
+                cap_go    <= 1'b0;
             end
 
             // ---- ② 收数据：一个 a_dv 一个字 ----
@@ -241,11 +252,12 @@ module aud_blk_rd #(
                 if (dbg_cnt != 16'hFFFF) dbg_cnt <= dbg_cnt + 16'd1;
                 dbg_sum                  <= dbg_sum + a_data;
                 wcnt_all <= wcnt_all + 21'd1;
-                // ★ 从第 CAP_START 个字起抓 32 个（各存一份，供顶层逐个报到串口）
-                if ((wcnt_all >= CAP_START) && (cap_cnt < 6'd32)) begin
+                // ★ 从"第一个真正的音乐字"起抓 32 个（供顶层逐个报到串口）
+                if ((cap_go || cap_hit) && (cap_cnt < 6'd32)) begin
                     cap[cap_cnt[4:0]] <= a_data;
                     cap_cnt <= cap_cnt + 6'd1;
                 end
+                if (cap_hit) cap_go <= 1'b1;
             end
             else if (wait_cnt != 16'hFFFF) wait_cnt <= wait_cnt + 16'd1;
 
