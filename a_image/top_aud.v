@@ -128,11 +128,7 @@ module top_aud #(
     output wire [15:0] dbg_aud_cnt,     // ★★ 第 8 条：音频数据自检（本次播放收了多少字）
     output wire [31:0] dbg_aud_sum,     // ★★ 第 8 条：音频数据自检（这些字的 32 位和）
     // ★★★ 2026-10-09：块级 FIFO 被饿穿过（sticky）—— 判"沙沙声是不是读没跟上"
-    output wire        dbg_aud_underrun,
-    // ★★★ 2026-10-11【音频抓字】：把从 SDRAM 收进来的头 32 个字逐个看到
-    input  wire [4:0]  cap_sel,
-    output wire [31:0] cap_dout,
-    output wire [5:0]  cap_cnt
+    output wire        dbg_aud_underrun
 );
 
     // ============================================================
@@ -227,10 +223,7 @@ module top_aud #(
         .dbg_sum       (dbg_aud_sum),
         .dbg_blk_cnt   (),
         .o_stall       (dbg_blk_stall),
-        .o_underrun    (aud_underrun_w),     // ★★ 饿死探针
-        .cap_sel       (cap_sel),            // ★★★ 抓字读口
-        .cap_dout      (cap_dout),
-        .cap_cnt       (cap_cnt)
+        .o_underrun    (aud_underrun_w)      // ★★ 饿死探针
     );
 
     // ============================================================

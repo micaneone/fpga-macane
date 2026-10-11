@@ -83,15 +83,7 @@ module aud_blk_rd #(
     output reg  [15:0] dbg_cnt,         // 本次播放从 SDRAM 收了多少个字（饱和）
     output reg  [31:0] dbg_sum,         // 这些字的 32 位累加和
     output reg  [15:0] dbg_blk_cnt,     // 一共服务完多少块
-    output reg         o_stall,         // 1 = 看门狗掐断过（sticky）
-    // ★★★ 2026-10-11【音频数据自检·抓字】：把**从 SDRAM 收进来的头 32 个字**存下来，
-    //   由顶层按索引一格格报到串口上（字段 21/22/25）。
-    //   为什么需要它：字段 31/32 的"字数 + 累加和"对一首音乐迟早饱和到 0xFFFF，
-    //   根本没法跟电脑上的 WAV 比；而**头 32 个字**既能直接看"像不像 PCM"
-    //   （音乐的相邻采样是平滑的；字节序/打包错了两两相差极大），也能拿去和 WAV 逐字对。
-    input  wire [4:0]  cap_sel,
-    output wire [31:0] cap_dout,
-    output reg  [5:0]  cap_cnt          // 一共抓了几个（应为 32）
+    output reg         o_stall          // 1 = 看门狗掐断过（sticky）
 );
 
     // ============================================================
@@ -111,25 +103,6 @@ module aud_blk_rd #(
     reg  [20:0] a_base_r, a_words_r;        // 本次播放的基址/字数（同步过来的）
     reg  [20:0] issued;                     // 已经申请出去多少个字
     reg  [20:0] got;                        // 当前这一块已经收到多少个字
-    reg  [31:0] cap [0:31];                 // ★ 头 32 个收进来的音频字
-    integer     ci;
-    // ★ 抓字读口（纯组合，给顶层按索引取值）—— 必须在 cap 声明之后
-    assign cap_dout = cap[cap_sel];
-    // ★ 抓字触发条件（任一 16bit 半字幅度 > CAP_TH）—— 具体表达式在 CAP_TH 声明之后
-    wire signed [15:0] cap_h0;
-    wire signed [15:0] cap_h1;
-    wire cap_hit;
-    // ★★★ 2026-10-11【抓字触发】：从**第一个"真正的音乐"字**开始抓 32 个。
-    //   为什么不能用固定下标：卡上 mus0.wav 开头 1.3 ms 是静音（前 32 个字全 0），
-    //   而 mus1.wav 的开头更久 —— 固定下标抓到的可能全是 0，什么也判不出来。
-    //   ⇒ 触发 = 任一 16bit 半字的幅度 > 1024（跳过静音和淡入）。
-    localparam signed [15:0] CAP_TH = 16'sd1024;
-    reg         cap_go;                     // 触发过就一直抓
-    reg [20:0]  wcnt_all;                   // 本次播放一共收了多少个字（不饱和）
-    assign cap_h0 = a_data[15:0];
-    assign cap_h1 = a_data[31:16];
-    assign cap_hit = (cap_h0 > CAP_TH) || (cap_h0 < -CAP_TH) ||
-                     (cap_h1 > CAP_TH) || (cap_h1 < -CAP_TH);
     reg  [20:0] cur_len;                    // 当前这一块要多少字
     reg  [15:0] wait_cnt;                   // 看门狗
 
@@ -216,10 +189,6 @@ module aud_blk_rd #(
             dbg_sum     <= 32'd0;
             dbg_blk_cnt <= 16'd0;
             o_stall     <= 1'b0;
-            cap_cnt     <= 6'd0;
-            wcnt_all    <= 21'd0;
-            cap_go      <= 1'b0;
-            for (ci = 0; ci < 32; ci = ci + 1) cap[ci] <= 32'd0;
         end
         else begin
             // ---- ① 收一条播放命令：重排这一次的全部块 ----
@@ -233,9 +202,6 @@ module aud_blk_rd #(
                 run       <= 1'b1;
                 dbg_cnt   <= 16'd0;
                 dbg_sum   <= 32'd0;
-                cap_cnt   <= 6'd0;      // ★ 每次播放重新抓头 32 个字
-                wcnt_all  <= 21'd0;
-                cap_go    <= 1'b0;
             end
 
             // ---- ② 收数据：一个 a_dv 一个字 ----
@@ -251,13 +217,6 @@ module aud_blk_rd #(
                 wait_cnt                 <= 16'd0;
                 if (dbg_cnt != 16'hFFFF) dbg_cnt <= dbg_cnt + 16'd1;
                 dbg_sum                  <= dbg_sum + a_data;
-                wcnt_all <= wcnt_all + 21'd1;
-                // ★ 从"第一个真正的音乐字"起抓 32 个（供顶层逐个报到串口）
-                if ((cap_go || cap_hit) && (cap_cnt < 6'd32)) begin
-                    cap[cap_cnt[4:0]] <= a_data;
-                    cap_cnt <= cap_cnt + 6'd1;
-                end
-                if (cap_hit) cap_go <= 1'b1;
             end
             else if (wait_cnt != 16'hFFFF) wait_cnt <= wait_cnt + 16'd1;
 
