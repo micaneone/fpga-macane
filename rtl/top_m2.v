@@ -1052,6 +1052,10 @@ module top_m2 #(
     wire        sub_nz_v;
     wire [10:0] sub_dump_idx;        // ★ 2026-10-11 调试：逐字倒出的下标
     wire [31:0] sub_dump_word;       // ★ 2026-10-11 调试：逐字倒出的那个字
+    // ★★★ 2026-10-11【音频抓字】：从 SDRAM 收进来的头 32 个音频字（每个字 = 2 个采样）
+    wire [31:0] aud_cap_dout;
+    wire [5:0]  aud_cap_cnt;
+    wire [4:0]  aud_cap_sel;                     // = frame_id_w[4:0]（声明在后，见下面 assign）
     wire [31:0] blk_d_data;
 
     vendor_rd_path u_vrd (
@@ -1357,6 +1361,8 @@ module top_m2 #(
 
     wire            frame_start_w;
     wire [15:0]     frame_id_w;
+    // ★★★ 2026-10-11 音频抓字的索引：每帧换一格（= frame_id 的低 5 位）
+    assign aud_cap_sel = frame_id_w[4:0];
 
     desc_rx #(.SLOT_NUM(2)) u_desc (
         .clk_ctl(clk), .rst_ctl_n(sys_rst_n),
@@ -1622,7 +1628,10 @@ module top_m2 #(
         .dbg_blk_stall(aud_blk_stall),
         .dbg_aud_cnt  (aud_dbg_cnt),
         .dbg_aud_sum  (aud_dbg_sum),
-        .dbg_aud_underrun(aud_dbg_underrun)   // ★★ 2026-10-09 饿死探针
+        .dbg_aud_underrun(aud_dbg_underrun),  // ★★ 2026-10-09 饿死探针
+        .cap_sel       (aud_cap_sel),         // ★★★ 音频抓字读口
+        .cap_dout      (aud_cap_dout),
+        .cap_cnt       (aud_cap_cnt)
     );
 
     // ============================================================
@@ -1978,18 +1987,18 @@ module top_m2 #(
         // ★★ 2026-09-28 第四轮：这四个字段改接"整行扫描组号 + 第一个错像素的位置/值"
         //    （A 那几个诊断数在自测图模式下本来就没有意义，出图版要的话改回来即可）
         // ★ 第六轮：边缘巡检 —— 字段 21..24 = 组号 / 趟号 / 奇偶 / 看的窗口行
-        // ★★★ 2026-10-11【调试临时占用】：字段 21 = 字幕 RAM 逐字倒出的**下标**，
-        //   字段 22 = 那个字的**低 16 位**，字段 25 = 那个字的**高 16 位**。
-        //   配合 PERIOD_MS=16（≈ 一帧一条）就能把整条字幕 RAM 一个字不落地取回来。
-        //   查完改回：字段21/22 = px_grp/pass_i，字段25 = wr_beats。
-        .st_read_cnt({5'd0, sub_dump_idx}),      // 字段21：倒到第几个字
-        .st_bad(sub_dump_word[15:0]),            // 字段22：这个字的低 16 位
+        // ★★★ 2026-10-11【调试临时占用·改成音频抓字】：字幕那 1600 个字已经逐字验过
+        //   （0/1600 不同，见《B轨待改清单》§28），这几个格子现在拿来抓**音频**：
+        //   字段 21 = 抓第几个音频字（0..31）、字段 22 = 低 16、字段 25 = 高 16。
+        //   每帧换一格 ⇒ 报告周期 16 ms 正好把 32 格扫一遍。
+        .st_read_cnt({11'd0, aud_cap_sel}),      // 字段21：抓到第几个音频字
+        .st_bad(aud_cap_dout[15:0]),             // 字段22：这个字的低 16 位
         // ★ 第六轮：字段 23/24 改接【A 请求的长度 a_wr_len】—— "一帧最后 256 个字
         //   没写进 SDRAM"到底是 A 请求短了、还是引擎少写了一段，看
         //   字段 0/1（引擎实写字数）+ 字段 11（A 自己推的字数）+ 这两个数就能定死。
         .st_off(a_wr_len[15:0]),                 // 字段23：A 请求的长度低 16 位
         .st_first({11'd0, a_wr_len[20:16]}),     // 字段24：A 请求的长度高位
-        .st_w0(sub_dump_word[31:16]), .st_w1(wr_bursts), .st_w2(clash_cyc),   // 字段25：这个字的高 16 位
+        .st_w0(aud_cap_dout[31:16]), .st_w1(wr_bursts), .st_w2(clash_cyc),   // 字段25：这个字的高 16 位
         // ★★ 2026-10-05：字段 28 从"固定 0"改成【音频链状态位图】
         //   高 8 位：bit7=fail bit6=loaded bit5=音频PLL锁 bit4=busy
         //            bit3=有音频数据流 bit2=play_tgl 在翻 bit1:0=状态机(0等图/1等待/2装载/3做完)
