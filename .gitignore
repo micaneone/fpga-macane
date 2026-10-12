@@ -23,3 +23,10 @@ wave/
 # ---- 随手放的备份 ----
 *.bak
 *.orig
+
+# ---- 同步脚本顺手带进来的重复副本 ----
+#   sync_b_display.ps1 会把仓库 b_display\*.v 整份拷过来，而**本工程**用的
+#   是 rtl\blk_rd_arb.v 和 rtl\vendor_rd_path.v（见 prj\M2.al），b_display\ 下这两份
+#   只是同一份代码的副本 ⇒ 不进仓库，免得以后误提交、也免得两份不一致。
+b_display/blk_rd_arb.v
+b_display/vendor_rd_path.v
