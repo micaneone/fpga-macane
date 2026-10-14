@@ -112,6 +112,10 @@ module aud_blk_rd #(
     reg  [AFIFO_AW:0] arp;                  // 读指针（音频域）
     reg  [AFIFO_AW:0] argray_sync;          // 读指针同步回显存域
     reg  [AFIFO_AW:0] wgray_s1, wgray_s2;   // 写指针同步到音频域
+    // ---- ★★★ 2026-10-14 深夜【开播清空 FIFO】----
+    reg               flush_tgl;            // 显存域：播放命令时翻转（跨域用）
+    reg               fl1, fl2, fl3;        // 音频域：同步 + 检边沿
+    wire              flush_pulse = fl2 ^ fl3;   // 翻转 = 一条"清空"命令（声明在用它的 always 之前）
 
     // ---- 命令同步（显存域）----
     reg         ap1, ap2, ap3;
@@ -287,8 +291,24 @@ module aud_blk_rd #(
         else begin
             wgray_s1 <= bin2gray(awp);
             wgray_s2 <= wgray_s1;
-            if (aud_next) arp <= arp + 1'b1;
+            if (flush_pulse)   arp <= wrp_bin;         // ★ 清空：读指针追上写指针 = 丢弃上一轮残留
+            else if (aud_next) arp <= arp + 1'b1;
         end
+    end
+
+    // ★★★ 2026-10-14 深夜【开播清空 FIFO —— 治"播放开头那一声噪点"】
+    //   机理：每次播放**结束时 FIFO 里还留着若干字**（块长 = 深度，收尾时总有余量），
+    //   下一次播放会**先放这些陈旧字** ⇒ 开头一声噪；剩几个取决于上次结束时的仲裁时序
+    //   ⇒ 概率性；时序裕量随布局浮动 ⇒ 次数随版本变。
+    //   修法：播放命令跨到音频域后，把读指针追到写指针（arp <= wrp_bin）⇒ 视为空。
+    //   ★ 新请求的块至少几百 ns 才回来，清空吃不掉新数据。
+    always @(posedge clk_mem or negedge rst_mem_n) begin
+        if (!rst_mem_n)        flush_tgl <= 1'b0;
+        else if (a_play_pulse) flush_tgl <= ~flush_tgl;
+    end
+    always @(posedge clk_aud or negedge rst_aud_n) begin
+        if (!rst_aud_n) begin fl1 <= 1'b0; fl2 <= 1'b0; fl3 <= 1'b0; end
+        else            begin fl1 <= flush_tgl; fl2 <= fl1; fl3 <= fl2; end
     end
 
     assign aud_dout = afifo[arp[AFIFO_AW-1:0]];

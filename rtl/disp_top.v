@@ -77,6 +77,11 @@ module disp_top #(
     input  wire [20:0] sub_base,      // 字幕区基址 + 条号×1600
     input  wire [15:0] sub_ink,       // bit=1 画这个颜色（默认黑）
     input  wire        sub_tpat,      // ★ 一次性诊断：左半屏画自产方块（见 subtitle_ovl 注释）
+    // ★★★ 2026-10-15【功能 · 开关4（SW4/C5）→ 字幕水平滚动】
+    //   1 = 滚动；0 = 静止。**像素域电平**（顶层已把 sw4 同步到 clk_pix，见 top_m2）。
+    //   ★ 它只往 subtitle_ovl 里传，本模块自己一个门都不加（纯接线）。
+    //   ★ 域：和 sub_on 等一样是 clk_pix 域的慢变电平 ⇒ 直接接，不用再打拍。
+    input  wire        sub_scroll,
     // 读口第三个客户（→ blk_rd_arb 的 s_* 那一组）
     output wire        s_blk_req,
     output wire [20:0] s_blk_base,
@@ -289,6 +294,10 @@ module disp_top #(
         .sub_on(sub_on), .sub_x0(sub_x0), .sub_y0(sub_y0),
         .sub_w(sub_w), .sub_h(sub_h), .sub_base(sub_base), .ink(sub_ink),
         .tpat_half(sub_tpat),
+        // ★★★ 2026-10-15【功能 · 开关4 → 字幕水平滚动】：像素域电平（顶层 sw4 的四级同步之后）
+        //   ★ 时钟域：和 `clk_pix` 同域（它就是本模块的 clk_pix）；复位仍用 `rst_pix_n`
+        //     （= 顶层的 disp_rst_n ⇒ 装载期间整块复位时它跟着复位 ⇒ 复位后 offset=0）。
+        .scroll_en(sub_scroll),
         .mem_req(s_blk_req), .mem_base(s_blk_base), .mem_len(s_blk_len),
         .mem_gnt(s_blk_gnt), .mem_next(s_blk_next),
         .mem_dv(s_blk_dv), .mem_data(s_blk_data), .mem_fin(s_blk_fin),

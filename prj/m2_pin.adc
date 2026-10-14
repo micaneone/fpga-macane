@@ -2,7 +2,7 @@
 #  M1 集成工程引脚约束（康芯 HX4S20C / EG4S20BG256）
 #
 #  顶层端口（top_m1.v）：
-#    clk  rst_n  key1  key2  key3
+#    clk  rst_n  key1  key2  key3  sw3  sw4
 #    sd_ncs sd_dclk sd_mosi sd_miso
 #    led[3:0]  seg_sel[5:0]  seg_data[7:0]  uart_tx
 #    HDMI_CLK_P HDMI_D0_P HDMI_D1_P HDMI_D2_P HDMI_DDC_SCL HDMI_DDC_SDA
@@ -30,6 +30,29 @@ set_pin_assignment	{ rst_n }	{ LOCATION = A2; IOSTANDARD = LVCMOS33; PULLTYPE = 
 set_pin_assignment	{ key1 }	{ LOCATION = B2; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }
 set_pin_assignment	{ key2 }	{ LOCATION = C1; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }
 set_pin_assignment	{ key3 }	{ LOCATION = B1; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }
+
+# ---------- 开关3（拨码/乒乓开关，SW3 = C6）：★ 音频切换（每拨一次 → 下一条 .WAV）----------
+#   来源（三处，互为印证）：
+#     · 《HX4S20 开发板手册》p.18 图 2-19：SW1=C8 / SW2=C7 / **SW3=C6** / SW4=C5
+#     · 原理图网名 `NLSWKEY03` = **C6**
+#     · 官方 DEMO 约束里 `key[2]`（`SW[2]`）= **C6**，且都写 PULLTYPE = PULLUP
+#   ★ 必须 PULLUP：开关"1"那一侧是**开路**的（只有另一侧接地），
+#     内部不上拉就会悬空、读数乱跳（和上面三个按键同理）。
+#   ★ 极性两份官方文档矛盾 ⇒ RTL 里用 `sw_edge_debounce` 双边沿，不依赖方向。
+set_pin_assignment	{ sw3 }	{ LOCATION = C6; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }
+
+# ---------- 开关4（拨码/乒乓开关，SW4 = C5）：★ 字幕水平滚动（拨到某一侧 = 滚动）----------
+#   来源（与上面 SW3 同一组，三处互印证）：
+#     · 《HX4S20 开发板手册》p.18 图 2-19：SW1=C8 / SW2=C7 / SW3=C6 / **SW4=C5**
+#     · 原理图网名 `NLSWKEY04` = **C5**（SW3 是 `NLSWKEY03` = C6，同一族）
+#     · 官方 DEMO 约束里 `key[3]`（`SW[3]`）= **C5**，且写 PULLTYPE = PULLUP
+#   ★ 必须 PULLUP：开关"1"那一侧是**开路**的（只有另一侧接地），不内部上拉就会悬空、读数乱跳。
+#   ★ 极性两份官方文档矛盾 ⇒ RTL 里按【电平】用（不是边沿/脉冲），不依赖"哪边是 1"的文档：
+#       拨到上拉/开路侧（丝印 1）= 读 1 = 滚动；拨到接地侧（丝印 0）= 读 0 = 静止。
+#       万一板子方向和手册相反：把 top_m2 里送给 disp_top 的 `sw4_p2` 取反一处即可。
+#   ★ 排查入口：万一拨 SW4 完全没反应，先确认串口/LED 正常、再核对手册 p.18 图 2-19 与
+#     原理图网名 NLSWKEY04 是否确为 C5（本工程 SW3=C6 已上板验证过，同一组开关可信度高）。
+set_pin_assignment	{ sw4 }	{ LOCATION = C5; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }
 
 # ---------- SD 卡（SPI，A 轨在用）----------
 #   ★ 卡座是 3.3V 供电的，直接用 LVCMOS33；MISO 上拉（卡不在时不要悬空）

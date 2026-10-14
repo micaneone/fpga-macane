@@ -35,6 +35,7 @@ module sfx_ctrl #(
     input  wire        play_sfx,        // 单拍脉冲：开始播
     input  wire  [3:0] sfx_id,          // 第几条（0 ~ SFX_NUM-1）
     input  wire  [7:0] volume,          // 音量
+    input  wire  [20:0] words_act,    // ★★★ 本次装入音效的【实际字数】（0 = 未知，退回 SFX_STRIDE）
 
     // ---- 去 sdr_rd_arb ----
     output reg         play_tgl,        // ★ toggle（跨到显存域用）
@@ -60,7 +61,7 @@ module sfx_ctrl #(
             if (play_sfx && id_ok && !busy) begin
                 //  ★ 基址 = 音效区基址 + 条号 × 每条长度
                 sfx_base  <= SFX_BASE + sfx_id * SFX_STRIDE[20:0];
-                sfx_words <= SFX_STRIDE[20:0];
+                sfx_words <= (words_act != 21'd0) ? words_act : SFX_STRIDE[20:0];   // ★ 播放长度 = 实际字数（治「太短」+「放完后的杂音」）
                 play_tgl  <= ~play_tgl;         // ★ 翻 toggle = 一条新命令
             end
         end
