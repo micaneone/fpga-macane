@@ -82,6 +82,14 @@ module disp_top #(
     //   ★ 它只往 subtitle_ovl 里传，本模块自己一个门都不加（纯接线）。
     //   ★ 域：和 sub_on 等一样是 clk_pix 域的慢变电平 ⇒ 直接接，不用再打拍。
     input  wire        sub_scroll,
+    // ---------------- ★★★ 2026-10-15【参数菜单·第1步】菜单面板（像素流水第 ④' 级）----------------
+    //   ★ 位置：**subtitle_ovl 之后、RGB565→RGB888 之前** —— 菜单盖在字幕之上。
+    //   ★ 这两根都是 clk_pix 域的**慢变电平**（顶层把 sw2/sw1 两级同步 + 菜单状态机
+    //     都在 50 MHz 控制域做好之后，再打两级同步送过来），本模块自己一个门都不加（纯接线）。
+    //   ★ 参数**不给默认值**：和 sub_on 那一组同一口径 —— 顶层必须显式接，
+    //     漏接会让综合报"端口未连接"而不是悄悄接 0（菜单那一路要的正是"漏接就报错"）。
+    input  wire        menu_on,       // 1 = 画菜单面板；0 = 逐位透传
+    input  wire [1:0]  menu_sel,      // 选中行 0..3（本步只挪高亮条；第 2 步选参数）
     // 读口第三个客户（→ blk_rd_arb 的 s_* 那一组）
     output wire        s_blk_req,
     output wire [20:0] s_blk_base,
@@ -307,12 +315,52 @@ module disp_top #(
     );
 
     // ============================================================
+    //  ★★★ 2026-10-15【参数菜单·第1步】菜单面板 —— 像素流水第 ④' 级
+    // ------------------------------------------------------------
+    //  位置：**subtitle_ovl 之后（px_z）、RGB565→RGB888 之前** —— 也就是菜单**盖在
+    //        字幕上面**（字幕那条 800×64 的带子在屏底 y=528..592，菜单面板居中
+    //        y=200..400，两者本来就不重叠；万一日后重叠，菜单在上是符合直觉的）。
+    //  ★ `subtitle_ovl` 的取数/坐标/洗淡/滚动**一个字都没动** —— 菜单是**另一层**，
+    //    `menu_ovl` 只做"面板内换成它的纯色、面板外逐位透传"。
+    //  ★★ 坐标：`menu_ovl` 的输出比输入**晚两拍**（和 subtitle_ovl 同一口径，
+    //    见它文件头）。而 `o_dbg_x/o_dbg_y` 是**只打了一拍**的。若直接用，画的矩形会
+    //    整体**偏左上 2 个像素**（400 宽的画面里肉眼能看出来"框不方"）。
+    //    ⇒ 这里专门为它把坐标**再多打两拍**（`mx1/mx2`、`my1/my2`），和 `px_z` 同拍。
+    //    ★ 新加名字、**不动** `o_dbg_x/o_dbg_y` 这两个输出（其它自检模块在用）。
+    //  ★ 菜单关闭（`menu_on`=0）时：`menu_ovl` 里所有 `draw_*` 恒 0 ⇒ `px_m` 与 `px_z`
+    //    逐位相同 ⇒ 本模块输出与改前一模一样。
+    // ============================================================
+    reg [11:0] mx1, mx2, my1, my2;
+    always @(posedge clk_pix or negedge rst_pix_n) begin
+        if (!rst_pix_n) begin
+            mx1 <= 12'd0; mx2 <= 12'd0;
+            my1 <= 12'd0; my2 <= 12'd0;
+        end
+        else begin
+            mx1 <= o_dbg_x; mx2 <= mx1;      // o_dbg_x 已经是"晚一拍" ⇒ 再两拍 = 共三拍
+            my1 <= o_dbg_y; my2 <= my1;      // = 和 px_z / sub_*_z 同一像素
+        end
+    end
+
+    wire [15:0] px_m;
+    wire        de_m, vs_m;
+
+    menu_ovl u_menu (
+        .clk_pix(clk_pix), .rst_pix_n(rst_pix_n),
+        .de_in(de_z), .vs_in(vs_z),
+        .x_in(mx2), .y_in(my2),
+        .px_in(px_z),
+        .px_out(px_m), .de_out(de_m), .vs_out(vs_m),
+        .menu_on(menu_on), .menu_sel(menu_sel)
+    );
+
+    // ============================================================
     //  RGB565 → RGB888（低位补高位）
     // ============================================================
     wire [23:0] rgb888 = {
-        px_z[15:11], px_z[15:13],
-        px_z[10:5],  px_z[10:9],
-        px_z[4:0],   px_z[4:2]
+        px_m[15:11], px_m[15:13],
+        px_m[10:5],  px_m[10:9],
+        px_m[4:0],   px_m[4:2]
     };
 
     // ============================================================
@@ -325,8 +373,8 @@ module disp_top #(
         .I_pclk      (clk_par),
         .I_serial_clk(clk_ser),
         .I_rst       (~rst_pix_n),
-        .I_vs        (vs_z),           // ★ 改用字幕那一级之后的（和 rgb888 同拍）
-        .I_de        (de_z),
+        .I_vs        (vs_m),           // ★ 改用菜单那一级之后的（和 rgb888 同拍）
+        .I_de        (de_m),
         .I_rgb       (rgb888),
         .O_tmds_clk_p(HDMI_CLK_P),
         .O_tmds_d0_p (HDMI_D0_P),
@@ -349,8 +397,8 @@ module disp_top #(
     // ---- 诊断引出 ----
     assign o_frame_start = frame_start;
     assign o_frame_id    = frame_id;
-    assign o_de          = de_z;        // ★ 送给 HDMI 的那一拍（转场 + 字幕之后）
-    assign o_vs          = vs_z;
-    assign o_rgb565      = px_z;
+    assign o_de          = de_m;        // ★ 送给 HDMI 的那一拍（转场 + 字幕 + 菜单之后）
+    assign o_vs          = vs_m;
+    assign o_rgb565      = px_m;
 
 endmodule

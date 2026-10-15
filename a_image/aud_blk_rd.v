@@ -34,6 +34,16 @@
 //    一致 —— 它已经上板跑通过（能听出音乐），不改成厂商 IP 是为了不引入
 //    新变量（SHOW_AHEAD/OUTREG 那些性子会牵动 sfx_player 的取数协议）。
 //
+//  ★★★ 2026-10-15【存储搬 BRAM，协议不动】（本次改动，见第三节注释）
+//    · afifo 256x32 之前被推成分布式 RAM（音频域 LUT-As-Dram = 480），
+//      器件 BRAM 只用了 44/64 ⇒ 把它搬进 BRAM（BRAM 必须寄存读）。
+//    · 只在【本文件内】加一套 show-ahead 输出寄存器（dout_r/dout_v），
+//      对外仍是"vld=1 ⇒ dout 就是下一个字，当拍 next 取走"，sfx_player 不改。
+//    · 厂商 FIFO (lib/sdram/afifo_16_32_256.v 里定义的 wfifo_32_32_512)
+//      **不能用**：它只有一个 `rst`，会同时清掉读写两侧指针
+//      （写指针被清 = 和"开播清空 FIFO"（arp <= wrp_bin）以及显存域的
+//       afifo_used_m 记账冲突）。已确认 ⇒ 坚持手写。
+//
 //  ★★★ 声明全部前置（这个工程踩过五次"先用后声明"）
 // ============================================================
 `timescale 1ns / 1ps
@@ -112,6 +122,21 @@ module aud_blk_rd #(
     reg  [AFIFO_AW:0] arp;                  // 读指针（音频域）
     reg  [AFIFO_AW:0] argray_sync;          // 读指针同步回显存域
     reg  [AFIFO_AW:0] wgray_s1, wgray_s2;   // 写指针同步到音频域
+
+    // ---- ★★★ 2026-10-15【把这块 FIFO 从 LUTRAM 搬进 BRAM】----
+    //   原来 afifo 被推成【分布式 RAM】（异步读）：`aud_dout = afifo[arp]` 是组合输出，
+    //   面积报告里音频域 "LUT As Dram = 480"。BRAM 只有【寄存读】，所以这里补一套
+    //   标准 show-ahead：dout_r 里始终握着"下一个要吐的字"，dout_v 是它的有效位。
+    //   对外语义不变：`aud_vld=1` ⇒ `aud_dout` 就是下一个字，消费端当拍取走 + 当拍 aud_next。
+    reg  [31:0] dout_r;                     // BRAM 寄存读输出（show-ahead）
+    reg         dout_v;                     // 1 = dout_r 里的字有效、且还没被取走
+    // ★ 读地址必须【组合选择】（上次搬 BRAM "上板没声音" 就是栽在这一条）：
+    //   要预读下一个字时指向 arp+1，否则停在 arp（继续握着当前这个字）。
+    //   ✗ 若写成 `if (预读) raddr <= arp;` 再 `dout_r <= afifo[raddr];`
+    //     非阻塞右值用的是【旧】raddr ⇒ 数据比有效位晚 2 拍 ⇒ 重复吐字/错位。
+    wire [AFIFO_AW-1:0] aud_rd_addr =
+        (dout_v && aud_next) ? (arp[AFIFO_AW-1:0] + 1'b1) : arp[AFIFO_AW-1:0];
+
     // ---- ★★★ 2026-10-14 深夜【开播清空 FIFO】----
     reg               flush_tgl;            // 显存域：播放命令时翻转（跨域用）
     reg               fl1, fl2, fl3;        // 音频域：同步 + 检边沿
@@ -280,20 +305,48 @@ module aud_blk_rd #(
     assign aud_busy = run;
 
     // ============================================================
-    //  三、音频域：从 FIFO 取（和 A 那版逐行一致）
+    //  三、音频域：从 FIFO 取
+    //     ★★★ 2026-10-15【存储换成 BRAM ⇒ 这一段改成寄存读 + show-ahead】
+    //     协议一个字没变：`aud_vld=1` ⇒ `aud_dout` 就是下一个字，
+    //     消费端（sfx_player）当拍取走、当拍拉 `aud_next`。
+    //     唯一区别：FIFO 从"空"变"有"时，第一个字晚 1 拍 clk_aud（寄存读的固有代价，
+    //     81 ns；消费端 buf0/buf1 顶得住，字序/字数/校验和都不受影响）。
     // ============================================================
     always @(posedge clk_aud or negedge rst_aud_n) begin
         if (!rst_aud_n) begin
             arp      <= {(AFIFO_AW+1){1'b0}};
             wgray_s1 <= {(AFIFO_AW+1){1'b0}};
             wgray_s2 <= {(AFIFO_AW+1){1'b0}};
+            dout_v   <= 1'b0;
         end
         else begin
             wgray_s1 <= bin2gray(awp);
             wgray_s2 <= wgray_s1;
-            if (flush_pulse)   arp <= wrp_bin;         // ★ 清空：读指针追上写指针 = 丢弃上一轮残留
-            else if (aud_next) arp <= arp + 1'b1;
+            if (flush_pulse) begin
+                arp    <= wrp_bin;         // ★ 清空：读指针追上写指针 = 丢弃上一轮残留
+                dout_v <= 1'b0;            // ★ 输出寄存器里那个字也一并作废
+            end
+            else if (dout_v) begin
+                // ---- 手里有一个字：消费端取走时，预读下一个 ----
+                //   ★ 有效位与数据严格对齐：预读在【这一拍】发起（数据下一拍进 dout_r），
+                //     所以 dout_v 也在这一拍置位 —— 下一拍 dout_r / dout_v 同时到位。
+                //     ✗ 不能把"刚发出的预读"或进 aud_vld（那样会早一拍报有效）。
+                if (aud_next) begin
+                    arp    <= arp + 1'b1;
+                    dout_v <= (afifo_cnt > {{AFIFO_AW{1'b0}}, 1'b1});   // 还有第 2 个字吗
+                end
+            end
+            else if (afifo_cnt != {(AFIFO_AW+1){1'b0}}) begin
+                // ---- 手里空着、FIFO 里有字：装载头一个字（下一拍 dout_r/dout_v 到位）----
+                dout_v <= 1'b1;
+            end
         end
+    end
+
+    // ★ BRAM 的寄存读：**无条件、无复位、无使能**（有一样 TD 都可能退回 LUTRAM）。
+    //   地址由上面 aud_rd_addr 组合选出 —— 这是上一次搬 BRAM 失败的那个坑。
+    always @(posedge clk_aud) begin
+        dout_r <= afifo[aud_rd_addr];
     end
 
     // ★★★ 2026-10-14 深夜【开播清空 FIFO —— 治"播放开头那一声噪点"】
@@ -311,8 +364,13 @@ module aud_blk_rd #(
         else            begin fl1 <= flush_tgl; fl2 <= fl1; fl3 <= fl2; end
     end
 
-    assign aud_dout = afifo[arp[AFIFO_AW-1:0]];
-    assign aud_vld  = (afifo_cnt != {(AFIFO_AW+1){1'b0}});
+    // ---- 对外输出：全部来自输出寄存器（和 BRAM 那套 show-ahead 配套）----
+    //   ★ 占用口径一个字没改：`arp` 仍然指向"还没被取走的那个字"，所以
+    //     afifo_used_m = awp - argray_bin 天然把"已预读、还在 dout_r 里没被取走"
+    //     的字算在内（宁多不少）。★ 千万别再加 +1/+2 的保守量：
+    //     ROOM_LIMIT = 0 ⇒ room_now = (used_m <= 0)，一加就永远申请不出块 = 死锁。
+    assign aud_dout = dout_r;
+    assign aud_vld  = dout_v;
 
     // ★★ 2026-10-09【饿死探针】：消费端 `aud_next` 要字、而这一拍 FIFO 里没有 ⇒ sticky。
     //   注意：只在"这一拍确实在消费"时才算（`aud_next` 本来就是消费脉冲）。
@@ -321,9 +379,14 @@ module aud_blk_rd #(
         else if (aud_next && !aud_vld) o_underrun <= 1'b1;
     end
 
-    // ---- 初始化一下 FIFO 内容（仿真/上电时别读 X；上板不需要但无害）----
+    // ---- 初始化一下 FIFO 内容（只给仿真用；上电别读 X）----
+    //   ★★★ 2026-10-15【搬 BRAM 的硬前提】：数组上**不能有整块 initial 赋值**，
+    //   否则 TD 不肯把它推断成 BRAM（会退回 LUTRAM）。TD 工程里没有全局宏
+    //   （见 check_compile.ps1 顶部说明）⇒ 综合时这块**根本不存在**。
+    `ifdef AFIFO_SIM_INIT
     initial begin
         for (i = 0; i < AFIFO_DEPTH; i = i + 1) afifo[i] = 32'd0;
     end
+    `endif
 
 endmodule

@@ -1,8 +1,8 @@
 # ============================================================
 #  M1 集成工程引脚约束（康芯 HX4S20C / EG4S20BG256）
 #
-#  顶层端口（top_m1.v）：
-#    clk  rst_n  key1  key2  key3  sw3  sw4
+#  顶层端口（top_m2.v）：
+#    clk  rst_n  key1  key2  key3  sw1  sw2  sw3  sw4
 #    sd_ncs sd_dclk sd_mosi sd_miso
 #    led[3:0]  seg_sel[5:0]  seg_data[7:0]  uart_tx
 #    HDMI_CLK_P HDMI_D0_P HDMI_D1_P HDMI_D2_P HDMI_DDC_SCL HDMI_DDC_SDA
@@ -30,6 +30,22 @@ set_pin_assignment	{ rst_n }	{ LOCATION = A2; IOSTANDARD = LVCMOS33; PULLTYPE = 
 set_pin_assignment	{ key1 }	{ LOCATION = B2; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }
 set_pin_assignment	{ key2 }	{ LOCATION = C1; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }
 set_pin_assignment	{ key3 }	{ LOCATION = B1; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }
+
+# ---------- 开关1 / 开关2（拨码/乒乓开关，SW1 = C8、SW2 = C7）----------
+#  ★★★ 2026-10-15【参数菜单·第1步】这两个是**本步新接**的（原来没约束、RTL 也没端口）：
+#    · **SW2（C7）**：每拨动一次 ⇒ 菜单 开 / 关 **翻转**
+#    · **SW1（C8）**：菜单打开时 = 光标 **上 / 下移**（方向由"变化那一拍的电平"定符号）
+#  来源（三处，互为印证 —— 和下面 SW3/SW4 同一组、同一份资料）：
+#    · 《HX4S20 开发板手册》p.18 图 2-19：**SW1=C8** / **SW2=C7** / SW3=C6 / SW4=C5
+#    · 原理图网名 `NLSWKEY01` = **C8**、`NLSWKEY02` = **C7**（SW3 是 `NLSWKEY03` = C6，同一族）
+#    · 官方 DEMO 约束里 `key[0]`/`key[1]`（`SW[0]`/`SW[1]`）= **C8**/**C7**，且都写 PULLTYPE = PULLUP
+#  ★ 必须 PULLUP：开关"1"那一侧是**开路**的（只有另一侧接地），
+#    内部不上拉就会悬空、读数乱跳（和上面三个按键 / SW3 / SW4 同理）。
+#  ★ 极性：RTL 里 SW2/SW1 都用 `sw_edge_debounce` 的"任意方向变化出一拍脉冲"，
+#    SW2 只认"变化"（不看方向）；SW1 用**变化那一拍的电平**定上下 —— 那个极性在
+#    `top_m2.v` 里是一行 localparam（`MENU_UP_ON_1`），上板反了就改那一个 bit。
+set_pin_assignment	{ sw1 }	{ LOCATION = C8; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }
+set_pin_assignment	{ sw2 }	{ LOCATION = C7; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }
 
 # ---------- 开关3（拨码/乒乓开关，SW3 = C6）：★ 音频切换（每拨一次 → 下一条 .WAV）----------
 #   来源（三处，互为印证）：

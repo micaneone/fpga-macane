@@ -61,6 +61,23 @@ module top_m2 #(
     input  wire       key1,          // 丝印 KEY2 / B2：读地址补偿旋钮（调试用，见 0b 节）
     input  wire       key2,          // 丝印 KEY4 / C1：软复位重来
     input  wire       key3,          // 丝印 KEY3 / B1：★ 装载 / 换下一张（skip+1）
+    // ★★★ 2026-10-15【参数菜单·第1步】两个**新接**的拨码开关（SW1 / SW2）
+    // ------------------------------------------------------------
+    //  板上丝印 ↔ FPGA 引脚（三处来源，互为印证）：
+    //    · 《HX4S20 开发板手册》p.18 图 2-19：**SW1 = C8** / **SW2 = C7** / SW3 = C6 / SW4 = C5；
+    //    · 原理图网名 `NLSWKEY01` = C8、`NLSWKEY02` = C7（SW3 是 `NLSWKEY03` = C6，同一族）；
+    //    · 官方 DEMO 约束里 `key[0]`、`key[1]`（`SW[0]`、`SW[1]`）= C8、C7，且都写 `PULLTYPE = PULLUP`。
+    //  ★ 约束里**必须** `PULLTYPE = PULLUP`（见 prj\m2_pin.adc）：开关"1"那一侧是**开路**的，
+    //    内部不上拉就会悬空乱读 —— 和三个按键、SW3/SW4 同理。
+    //  ★ 语义（**用户 2026-10-15 定稿 + 同日"操作方式修订"**，不要再自行发挥）：
+    //     · **sw2**（SW2/C7）：每拨动一次 ⇒ 菜单开关 `menu_on` **翻转**（不做方向判断）；
+    //     · **sw1**（SW1/C8）：**两档拨动开关 ⇒ 只能当"方向状态位（电平）"用，不能当"上/下按键"**
+    //       ⇒ 同步后 `menu_dir = sw1`（1 = 上 / 0 = 下），**它自己不再产生任何脉冲**；
+    //     · **KEY3**（B1）：菜单**打开时 = 步进按钮**（每按一次光标按 `menu_dir` ±1，4 项回绕）；
+    //       菜单**关闭时照旧换图**（见下面菜单那一段的 ★，那是本步唯一动到的既有连线）。
+    //     · SW3 / SW4 / KEY2 / KEY4 本步**一字不改**。
+    input  wire       sw1,           // 丝印 SW1 / C8：★ 菜单光标**方向状态位**（电平：1 = 上）
+    input  wire       sw2,           // 丝印 SW2 / C7：★ 菜单开/关（每拨一次翻转）
     input  wire       sw3,           // 丝印 SW3 / C6：音频切换（每拨一次 → 下一条 .WAV）
     // ★★★ 2026-10-15【功能 · 开关4 → 字幕水平滚动】
     //   需求（用户原话）："按下开关4后，字幕水平滚动"。
@@ -229,6 +246,11 @@ module top_m2 #(
     //     "实际装入的字数"（把 `top_a` 的 `smp_cnt[20:1]` 引到 `sfx_ctrl` 的 `sfx_words`），
     //     见《B轨待改清单》§30.8。
     localparam integer SFX_STRIDE = 120000;   // ★★★ 回到契约 v9 的 120000（72000 会截掉 mus0.wav 最后 0.6 秒）；放完后的杂音改由「播放长度=实际字数」解决，不再靠缩短长度
+    // ★★★ 2026-10-15【音频溢出保护】：音效区容量（字），21 位、和 a_wr_len 同宽 ——
+    //   唯一来源就是上面那条 SFX_STRIDE（契约 v9 校验：1861660 + 120000 = 1981660 ✓）。
+    //   两处夹子都用它：① 播放长度（下面 latch `aud_words_act` 处）
+    //                   ② 装载长度（传给 top_a 的 AUDIO_MAX_WORDS）
+    localparam [20:0] SFX_WORDS_CAP = SFX_STRIDE;
     // ============================================================
     //  ★★★★ 2026-10-06【音频回退开关】AUDIO_OFF
     //    = 1：**完全不启动音频链** —— 不装音效、不播放 ⇒ 音频一个读都不发
@@ -656,6 +678,145 @@ module top_m2 #(
         .clk(clk), .rst(~sys_rst_n), .sw_in(sw3), .change_pulse(sw3_change)
     );
 
+    // ============================================================
+    //  ★★★ 2026-10-15【参数菜单·第1步】交互骨架 —— 全部在 **50 MHz 控制域**，慢变
+    // ------------------------------------------------------------
+    //  ★★★ 2026-10-15【参数菜单·操作方式修订】用户改稿：**SW1 是两档拨动开关，
+    //      不能当"按上 / 按下"用** ⇒ 操作方式改成：
+    //        · **SW1 = 方向状态位（电平）**：同步后 `menu_dir = sw1`（1 = 上 / 0 = 下）；
+    //          原来那段"SW1 方向变化脉冲驱动光标"的逻辑**已整段删除**（`u_sw1` 实例一起删）。
+    //        · **KEY3（B1）= 步进按钮**：`menu_on == 1` 时每按一次 ⇒ `menu_sel` 按 `menu_dir`
+    //          ±1（4 项，两端回绕）；**菜单关着时 KEY3 仍是老功能：换下一张图**。
+    //        · **菜单打开时屏蔽 KEY3 的"换图"作用**：喂给 `stub_ctrl` 的那根按键输入
+    //          改成 `key3 | menu_on`（按键**低有效** ⇒ 该表达式 = 1 表示"没按"）：
+    //          `menu_on = 1` 时它恒为 1 ⇒ `stub_ctrl` 里的消抖器永远看不到"按下" ⇒ 不换图。
+    //          ★ **只动这一处输入**（见下面 `u_ctrl` 那段），`stub_ctrl` 内部**一个字没改**；
+    //            `menu_on = 0` 时该门**原样透传** `key3` ⇒ **菜单关闭时行为逐位不变**。
+    // ------------------------------------------------------------
+    //  控件映射（**用户 2026-10-15 定稿 + 同日操作方式修订**，照这一张表做，不要自行发挥）：
+    //    · **SW2（引脚 C7）**   ：每拨动一次 ⇒ 菜单开关 `menu_on` **翻转**
+    //                             （只认"变化"，不判方向 ⇒ 手册把方向写反也不影响）
+    //    · **SW1（引脚 C8）**   ：菜单的**方向状态位**（**电平，不是脉冲**）——
+    //                             两档拨动开关没有"按一下"这个语义，所以**只读电平**：
+    //                             两级同步后 `menu_dir = MENU_UP_ON_1 ? sw1_lvl2 : ~sw1_lvl2`
+    //                             （1 = 上 / 0 = 下）。它**自己不再改变光标**，只决定
+    //                             下一次按 KEY3 往哪边走 ⇒ 上板先拨 SW1、再按 KEY3。
+    //                             ★ 方向极性仍然是**一行 localparam**（`MENU_UP_ON_1`），
+    //                               上板若发现上下反了，改那一个 bit 即可。
+    //    · **KEY3（引脚 B1）**  ：**菜单打开时 = 步进按钮**（每按一次 ±1、4 项回绕）；
+    //                             菜单关闭时 = **照旧"装载 / 换下一张"**（老路径一位没动）。
+    //                             ★ 消抖用的是**本块自己新加的**官方 `key_press_debounce`
+    //                               实例 `u_k3_menu`（和 `stub_ctrl` 里那个同款、同参数）——
+    //                               用户明确要求本步**不牵扯 `stub_ctrl` 内部**，所以宁可
+    //                               多一个实例，也不去复用它内部的 `k1_press`。
+    //    · **KEY2（引脚 B2，本工程端口 `key1`）**：菜单的"确定/决定" —— 本步仍**不接参数**，
+    //                             只保留已有的 `u_k1_ok` 实例与连线（`key1_ok_press` 悬空）。
+    //    · **KEY4（引脚 C1，端口 `key2`）**：**一字不动**（照旧软复位）。
+    //                             ★ 本步**不做任何复位门控**（用户明确要求）——
+    //                               `sys_rst_n` 那一行不碰、`stub_ctrl` 内部不碰。
+    //    · **SW3（引脚 C6）**   ：**一字不动**（照旧"切 4 条音频"）。
+    //                             ★ 所以本菜单块**不消费** `sw3_change`。
+    //    · **SW4（引脚 C5）**   ：**一字不动**（照旧"字幕水平滚动"）。
+    // ------------------------------------------------------------
+    //  ★ 菜单状态：菜单固定 **4 项** ⇒ `menu_sel` 2 位。
+    //  ★ 菜单关闭（`menu_on = 0`）时既有行为**逐位不变**，逐条论证：
+    //      · `menu_on` 被复位成 0、且只有拨 SW2 才翻转 ⇒ 上电行为与改前逐拍一致；
+    //      · 本块进入既有逻辑的东西只有两处，且**在 `menu_on = 0` 时都退化成原式**：
+    //        ① `stub_ctrl` 的按键输入 `key3 | menu_on` ⇒ `menu_on = 0` 时**恒等于 `key3`**
+    //           （按位或常量 0，综合后就是原来那根线）⇒ 换图 / 预装判据逐位不变；
+    //        ② 送给 `disp_top` 的 `menu_on_s2/menu_sel_s2` ⇒ 菜单关闭时菜单层被常数
+    //           传播消掉（见 disp_top / menu_ovl 的注释）；
+    //      · 其余全部只**读**既有信号（`sw2` / `sw1` / `key3` / `key1`），表达式一个没改；
+    //        `key1_ok_press` 本步悬空；`u_k3_menu` 的输出只进本块的 `menu_sel`；
+    //      · **KEY4 → `soft_rst` → `sys_rst_n`**、**SW3 → 音频状态机**、**SW4 → 字幕滚动**
+    //        这三条路**一个字符都没碰**。
+    //  ★ 为什么 SW1 现在**不需要** `sw_edge_debounce`：它已经是"状态位"语义（拨到哪边就是哪边），
+    //     抖动的后果最多是"某次按键时方向读错一次"；而 `sw1_lvl2` 是**两级同步后的慢变电平**，
+    //     在人手/人眼的时间尺度（≫ 20 ms）下不构成问题 ⇒ 原来那个消抖实例 `u_sw1` 已删除。
+    //  ★ 为什么 KEY3 的**新消抖实例** `u_k3_menu` 用 `~sys_rst_n` 复位（和 `u_sw2` 一致）：
+    //     和 `stub_ctrl` 内部那个（吃引脚 `rst_n`）不同 —— 这里跟软复位一起清：软复位后
+    //     菜单本来就该回到干净状态，且这样不会在软复位瞬间漏出一个假脉冲。
+    // ============================================================
+    localparam integer MENU_N = 4;                  // 菜单项数（固定 4）★ menu_ovl 的 ROW_N 必须一样
+    localparam integer MENU_W = 2;                  // 光标位宽（4 项 ⇒ 2 位）；改条数时这里也要改
+    // ★★★ 2026-10-15【参数菜单·操作方式修订】光标方向极性 —— **整个设计只此一行**
+    //   = 1：SW1 电平为 1 ⇒ `menu_dir = 1`（下一次按 KEY3 光标 **+1**，往上走）
+    //   = 0：SW1 电平为 1 ⇒ `menu_dir = 0`（下一次按 KEY3 光标 **−1**，往下走）
+    //   ★ 上板若发现"上下反了"，只改这一个 bit（不要动别处）。
+    localparam MENU_UP_ON_1 = 1'b0;
+
+    wire       sw2_change;                          // SW2：消抖后"任意方向变化"的单拍脉冲
+    reg        sw1_lvl1, sw1_lvl2;                  // ★ SW1 **电平**在控制域的同步副本（两级）
+    wire       menu_dir;                            // ★ 方向状态位：1 = 上 / 0 = 下（只读电平）
+    wire       key3_step_press;                     // ★ KEY3(B1)：菜单"步进"单拍脉冲（本块新实例）
+    reg        menu_on;                             // ★ 菜单开关（0 = 关，上电即 0）
+    reg  [MENU_W-1:0] menu_sel;                     // 光标（0..MENU_N-1）
+    wire       key1_ok_press;                       // KEY2(B2)/端口 key1：菜单"确定"脉冲（本步仍悬空）
+
+    // ---- SW2（C7）：消除抖动（20 ms）⇒ 每次拨动给一拍 ⇒ 翻转菜单开关 ----
+    sw_edge_debounce #(.CLK_FREQ_HZ(50_000_000), .DEBOUNCE_MS(20)) u_sw2 (
+        .clk(clk), .rst(~sys_rst_n), .sw_in(sw2), .change_pulse(sw2_change)
+    );
+
+    // ---- ★【操作方式修订】SW1（C8）**不再实例化消抖器** ----
+    //   它现在是**方向状态位（电平）**：上面那个 `always` 里的两级同步
+    //   （`sw1_lvl1/sw1_lvl2`）+ 一行 `assign menu_dir` 就够了，
+    //   不需要"变化出一拍脉冲"的 `sw_edge_debounce`（原来那个 `u_sw1` 已删除）。
+
+    // ---- ★★★【操作方式修订】KEY3（B1）的官方消抖实例：菜单"步进"（专供菜单用）----
+    //   ★ 和 `stub_ctrl` 内部那个（吃引脚 `rst_n`）**并行、互不影响** —— 用户要求本步
+    //     不牵扯 `stub_ctrl` 内部，所以宁可多一个实例，也不去复用它内部的 `k1_press`。
+    //   ★ 参数必须照 `stub_ctrl` 里 KEY3 的用法填（该模块默认 100 MHz，填错消抖时间差一倍）；
+    //     `rst` 高有效、`button_in` 低有效（不按 = 1）。复位用 `~sys_rst_n`（理由见块首 ★）。
+    //   ★ 它**只**产生 `key3_step_press`，消费者只有一个：下面那个 "菜单打开 + 步进" 分支。
+    key_press_debounce #(.CLK_FREQ_HZ(50_000_000), .DEBOUNCE_MS(20)) u_k3_menu (
+        .clk(clk), .rst(~sys_rst_n), .button_in(key3), .press_pulse(key3_step_press)
+    );
+
+    // ---- KEY2（B2，端口 key1）的官方消抖实例：菜单"确定"----
+    //   ★ 参数必须照 `stub_ctrl` 里 KEY3 的用法填（该模块默认 100 MHz，
+    //     填错消抖时间就差一倍）；`rst` 高有效、`button_in` 低有效（不按 = 1）。
+    //   ★ 它**只**产生 `key1_ok_press`；本步没有任何消费者（面板不写字）。
+    //   ★ `stub_ctrl` 里那个已有的 KEY4（= 端口 key2）实例**一个字都没动**。
+    //     上面 0b 节那个 `u_k1`（key_press_debounce，`rst` 用 `~rst_n`）也一个字没动
+    //     —— 那个是 KEY1/端口 key1 的"调试旋钮"通路，和本实例**并行**、互不影响。
+    key_press_debounce #(.CLK_FREQ_HZ(50_000_000), .DEBOUNCE_MS(20)) u_k1_ok (
+        .clk(clk), .rst(~sys_rst_n), .button_in(key1), .press_pulse(key1_ok_press)
+    );
+
+    always @(posedge clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin
+            sw1_lvl1 <= 1'b0;  sw1_lvl2 <= 1'b0;
+            menu_on  <= 1'b0;                         // ★ 菜单默认**关**（上电与改前一致）
+            menu_sel <= {MENU_W{1'b0}};
+        end
+        else begin
+            // ---- ★【操作方式修订】SW1 只做**两级同步**：它是"方向状态位"，不是脉冲 ----
+            sw1_lvl1 <= sw1;  sw1_lvl2 <= sw1_lvl1;
+            // ---- SW2：每拨一次 ⇒ 菜单开/关翻转（消抖模块已滤抖动，不会因弹跳多翻）----
+            if (sw2_change) menu_on <= ~menu_on;
+            // ---- ★【操作方式修订】KEY3：**菜单打开时**才当步进按钮（关着时它去换图）----
+            //    方向取**当前** SW1 状态位（`menu_dir`）⇒ 先拨 SW1 再按 KEY3，方向跟着变。
+            if (menu_on && key3_step_press) begin
+                if (menu_dir) begin
+                    // 上移：3 ⇒ 0，否则 +1
+                    if (menu_sel == (MENU_N - 1)) menu_sel <= {MENU_W{1'b0}};
+                    else                          menu_sel <= menu_sel + 1'b1;
+                end
+                else begin
+                    // 下移：0 ⇒ 3，否则 −1
+                    if (menu_sel == {MENU_W{1'b0}}) menu_sel <= (MENU_N - 1);
+                    else                            menu_sel <= menu_sel - 1'b1;
+                end
+            end
+        end
+    end
+
+    // ★★★ 2026-10-15【参数菜单·操作方式修订】SW1 电平 ⇒ 方向状态位（极性**只此一行**）
+    //   1 = 上 / 0 = 下；极性由上面那个 `MENU_UP_ON_1` 常量定（默认 0 ⇒ SW1 读 0 为"上"）。
+    //   ★ 纯组合：只在按 KEY3 那一拍被采样；它本身不产生脉冲、不影响任何既有信号。
+    assign menu_dir = MENU_UP_ON_1 ? sw1_lvl2 : ~sw1_lvl2;
+
     // ★★ 2026-10-05：音频域的复位（音频 PLL 也锁上才放开）—— 到这里 sys_rst_n 已经声明过了
     assign aud_rst_n = sys_rst_n & pll_aud_locked;
 
@@ -731,7 +892,10 @@ module top_m2 #(
 
     wire        req_tgl;                // 控制桩翻一次 = 请求换下一张
     wire [1:0]  fx_sel_ctl;             // 控制桩选的淡入特效
-    wire        k1_press_w;             // ★ 探针：消抖后的 KEY3 脉冲
+    wire        k1_press_w;             // ★ 探针：`stub_ctrl` 内部消抖后的 KEY3 脉冲
+                                        //   ★★★ 2026-10-15【操作方式修订】：它现在是"**过了
+                                        //   菜单门控之后**"的脉冲（输入 = `key3 | menu_on`）
+                                        //   ⇒ 菜单打开期间不计数；仅影响串口字段 6 的观测量。
     wire        req_pend_w;             // ★ 探针：转场请求挂起中
 
     // 控制域 → 像素域：req_tgl 取边沿 = 一拍请求脉冲
@@ -816,12 +980,46 @@ module top_m2 #(
         else             begin sw4_p1 <= sw4_s2; sw4_p2 <= sw4_p1; end
     end
 
+    // ============================================================
+    //  ★★★ 2026-10-15【参数菜单·第1步】菜单状态（50 MHz 控制域）→ 像素域：两级同步
+    // ------------------------------------------------------------
+    //   `menu_on` / `menu_sel` 都是**慢变电平**（只在人拨 SW2/SW1 时才动，最快也是
+    //   20 ms 一次），所以按本工程一贯的做法（`sub_on` / `pf_ready` / `sw4` 全是这一套）
+    //   打两级就够。
+    //   ★ 复位跟 `disp_rst_n`（和 sub_on/pfr/sw4 的口径一致）：装载期间显示整块被复位时
+    //     它跟着复位 ⇒ 复位后首帧菜单是关的。
+    //   ★ 跨域瞬间最多错一帧（16.6 ms 内），肉眼无感；绝不会在帧内改（那才可能撕画面）。
+    //   ★ 域：这两根接着 disp_top 的 `menu_on/menu_sel`，那里是 clk_pix 域 ⇒ 对。
+    // ============================================================
+    reg        menu_on_s1, menu_on_s2;                  // menu_on  → 像素域（两级）
+    reg  [MENU_W-1:0] menu_sel_s1, menu_sel_s2;         // menu_sel → 像素域（两级）
+
+    always @(posedge clk_pix or negedge disp_rst_n) begin
+        if (!disp_rst_n) begin
+            menu_on_s1  <= 1'b0;            menu_on_s2  <= 1'b0;
+            menu_sel_s1 <= {MENU_W{1'b0}};  menu_sel_s2 <= {MENU_W{1'b0}};
+        end
+        else begin
+            menu_on_s1  <= menu_on;    menu_on_s2  <= menu_on_s1;
+            menu_sel_s1 <= menu_sel;   menu_sel_s2 <= menu_sel_s1;
+        end
+    end
+
     stub_ctrl #(
         .CLK_HZ(50_000_000), .AUTO_DELAY_MS(100), .RST_HOLD_MS(5),
         .SLOT_BASE(0), .AUTO_START(CTL_AUTO_START)
     ) u_ctrl (
         .clk(clk), .rst_n(rst_n),
-        .key1(key3), .key2(key2),     // ★ key3（B1）= 装载 / 换下一张；key1（B2）留给偏移补偿旋钮
+        // ★★★ 2026-10-15【参数菜单·操作方式修订】**本步唯一动到的既有连线**：
+        //   `stub_ctrl` 的按键输入从 `key3` 改成 `key3 | menu_on`（按键**低有效**，
+        //   表达式 = 1 表示"没按"）⇒ **菜单打开时它恒为 1，换图那条路被屏蔽**；
+        //   `menu_on = 0` 时按位或常量 0 ⇒ **恒等于原来的 `key3`** ⇒ 菜单关闭行为逐位不变。
+        //   ★ `stub_ctrl` 内部**一个字没改**（`git status` 里 `rtl/stub_ctrl.v` 未修改）；
+        //     模块里 KEY3 的消抖（`u_k1`）/ 请求（`req_take`）/ 预装（`pf_go`）三条判据
+        //     都**只看这一根输入**，模块内**没有第二处**引用按键输入 ⇒ 只门控这一处就够。
+        //   ★ 唯一副作用（预期内）：菜单打开期间按 KEY3，串口字段 6 的 `k1_press_w`
+        //     计数不再增加（那是 `stub_ctrl` 的**输出**探针，喂给 `dbg_report`）。
+        .key1(key3 | menu_on), .key2(key2),   // ★ key3（B1）：菜单开着时被屏蔽 / 关着时换下一张
         .sd_ready(a_sd_ready), .a_busy(a_busy), .hold(stwr_busy),
         // ★ 转场握手：屏上全米白了才真的去装；转场期间不受理新请求
         .may_load(ml2), .tr_active(ac2),
@@ -874,7 +1072,10 @@ module top_m2 #(
     wire [31:0] a_dbg_wav_cnt;
     wire        a_dbg_scaled, a_dbg_wav_odd;
 
-    top_a #(.SLOT_NUM(2)) u_a (
+    // ★★★ 2026-10-15【音频溢出保护】：把"音效区容量"传进 top_a ——
+    //   top_a 用它同时夹【装载长度 sdr_len】和【放行的采样数】⇒ 超出 5.0 s 的字一个都不写，
+    //   绝不越界写进后面的小槽区 / 字幕区。契约常量仍然只在上面 SFX_STRIDE 一处定义。
+    top_a #(.SLOT_NUM(2), .AUDIO_MAX_WORDS(SFX_STRIDE)) u_a (
         .sys_clk(clk), .sys_rst_n(sys_rst_n),
         // ★★★ 2026-10-15：`top_a` 新版**端口表里已经没有 `clk_spi`**（47 个口，旧版 48 个）
         //   ⇒ 原来那句 `.clk_spi(clk_par),`（2026-10-08 的"SD 提速到 25 MHz"集成临时改动）
@@ -1671,6 +1872,10 @@ module top_m2 #(
         .sub_tpat(SUB_TPAT),
         // ★★★ 2026-10-15【功能 · 开关4 → 字幕水平滚动】：sw4 已在像素域（四级同步的最后一级）
         .sub_scroll(sw4_p2),
+        // ★★★ 2026-10-15【参数菜单·第1步】菜单层（在 subtitle_ovl 之后、565→888 之前）
+        //   ★ 传进去的是**像素域**的同步副本（上面那两级）：菜单关闭（menu_on=0）时
+        //     整个菜单层被常数传播消掉 ⇒ 一个门都不多、屏上逐像素回到改前。
+        .menu_on(menu_on_s2), .menu_sel(menu_sel_s2),
         .s_blk_req(sub_blk_req), .s_blk_base(sub_blk_base), .s_blk_len(sub_blk_len),
         .s_blk_gnt(sub_blk_gnt), .s_blk_next(sub_blk_next),
         .s_blk_dv(o_blk_dv[2]), .s_blk_data(sub_blk_data), .s_blk_fin(sub_blk_fin),
@@ -1918,7 +2123,11 @@ module top_m2 #(
             2'd2: begin
                 if (a_wav_done) begin
                     aud_loaded    <= 1'b1;
-                    aud_words_act <= a_wr_len;   // ★ 此刻 a_wr_len = 刚装完的音效字数
+                    // ★★★ 2026-10-15【音频溢出保护 · 播放侧】：播放长度【上限 = 音效区容量】
+                    //   （120000 字 = 5.0 s @48 kHz）—— 超过 5 秒的部分不放。
+                    //   不夹的话会一路播到音效区之外（区外紧挨着小槽区 / 字幕区）⇒ 读乱数据、沙沙。
+                    //   ★ 三元夹取：a_wr_len ≤ 上限时结果就等于 a_wr_len ⇒ ≤5 s 的文件逐位不变。
+                    aud_words_act <= (a_wr_len > SFX_WORDS_CAP) ? SFX_WORDS_CAP : a_wr_len;
                     aud_want     <= 1'b0;
                     aud_play_req <= 1'b1;
                     aud_st       <= 2'd3;
