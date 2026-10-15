@@ -2,15 +2,24 @@
       parameter [23:0] TARGET_EXT = {"B","M","P"}
   )(
       input             sys_clk,
-      // ★★ 2026-10-08【集成临时改动 · 提速到 25 MHz】：读移位器时钟，
-      //   透传给 sd_top。给 100 MHz ⇒ SCLK = 25 MHz；给 sys_clk = 原来的 12.5 MHz。
-      input             clk_spi,
       input             sys_rst_n,
-      // ---- SD 卡物理引脚（透传给内部的 sd_top）----
-      input             spi_miso,
-      output            spi_mosi,
-      output            spi_clk,
-      output            spi_cs,
+      // ★★★ 2026-10-15【第②步 · SD 前端三合一】：
+      //   原来这里透传 clk_spi + 4 根 SD 引脚，并在文件尾自己例化一份 sd_top
+      //   （sd_top = sd_init + sd_read_cdc + sd_read + my_spi，三条链那三份逐字相同）。
+      //   现在 sd_top **全局只有一份**，例化在 top_a 里（`u_sd_front`）；
+      //   三条链的 find_bmp 通过下面这组端口共享它 —— FAT/目录/簇链状态机一行没改。
+      //   ★ 本链的请求只在 `fe_owner=1`（= 当前 sd_mode_r 选中的那一条）时才被 top_a
+      //     送到前端；`fe_owner=0` 时连前端的应答都看不见（见下面 sd_ok/sd_done 的屏蔽）。
+      input             fe_init_done,   // ← 共享 sd_top.bus_owner（= 原来的 init_done）
+      input             fe_led,         // ← 共享 sd_top.led1
+      input             fe_owner,       // ★ 1 = 本链 = 当前 sd_mode_r 选中的那一条
+      output     [31:0] fe_lba,         // → 共享 sd_top.read_addr（本链仲裁后的地址）
+      output            fe_req,         // → 共享 sd_top.read_req
+      input      [7:0]  fe_data,        // ← 共享 sd_top.data_out
+      input             fe_ok,          // ← 每字节单拍
+      input             fe_done,        // ← 整块单拍
+      input             fe_busy,        // ← 电平
+      input             fe_err,         // ← 整块单拍
       // ---- 命令接口 ----
       input             start,
       input             cmd,
@@ -42,11 +51,21 @@
   );
       reg  [31:0] sd_lba;                    // find_bmp 的 FSM 驱动
       reg         sd_req;                    // 同上
-      wire [7:0]  sd_data;                   // 由 sd_top 驱动
-      wire        sd_ok, sd_done, sd_busy, sd_err;
-      wire [31:0] w_lba;                     // 仲裁后送给 sd_top
+      // ★★★ 第②步：前端在 top_a，这里只做「主 / 非主」屏蔽 ——
+      //   fe_owner=1 时下面这几根与改动前逐位等价（就是前端原来的信号）；
+      //   fe_owner=0 时本链看见的是「前端不存在」：busy 恒 0、没有任何 ok/done/err
+      //   ⇒ 非主链即使被误启动，也只会自己走看门狗 → fail（看得见的错），
+      //     绝不会把前端正在传给主链的字节当成自己的（看不见的错）。
+      wire [7:0]  sd_data = fe_data;
+      wire        sd_ok   = fe_ok   & fe_owner;
+      wire        sd_done = fe_done & fe_owner;
+      wire        sd_busy = fe_busy & fe_owner;
+      wire        sd_err  = fe_err  & fe_owner;
+      wire [31:0] w_lba;                     // 仲裁后送给共享前端
       wire        w_req;
-      wire init_done = bus_owner;            // 别名，FSM 里的 init_done 不用改
+      wire init_done = fe_init_done;         // 别名，FSM 里的 init_done 不用改
+      assign fe_lba = w_lba;                 // 本链的请求出口（top_a 按 fe_owner 三选一）
+      assign fe_req = w_req;
       localparam S_IDLE = 3'd0, S_WAIT = 3'd1, S_REQ  = 3'd2, S_RECV = 3'd3,
                  S_CALC = 3'd4, S_DONE = 3'd5, S_FAIL = 3'd6;
       localparam P_MBR = 2'd0, P_BPB = 2'd1, P_DIR = 2'd2, P_FAT = 2'd3;
@@ -87,10 +106,36 @@
       //======================================================================
       //  组合逻辑（避免「同一拍读到寄存器旧值」）
       //======================================================================
+      // ★★★ 2026-10-15【方案A · 移位替代乘法，省 DSP】
+      //   为什么逐位等价：FAT32 规范强制 BPB_SecPerClus 只能是 2 的幂（1/2/4/.../128），
+      //   所以 (X - 2) * sec_per_clus ≡ (X - 2) << log2(sec_per_clus) 恒成立 ——
+      //   原式本来就是 32 位截断乘（mod 2^32），左移在 mod 2^32 内同样截断，
+      //   两者对任意 X 的每一位都相同（合法卡上 0 差异）。
+      //   sec_per_clus 不是 2 的幂 = 违反规范的坏卡 ⇒ spc_ok=0 ⇒ P_BPB 直接 S_FAIL，
+      //   绝不会像原来那样静默算出一个错扇区地址。
+      //   译码结果只喂移位器（LUT 实现），不再占 DSP。
+      reg  [2:0]  spc_shift;
+      reg         spc_ok;
+      always @(*) begin
+          spc_ok    = 1'b1;
+          spc_shift = 3'd0;
+          case (sec_per_clus)
+              8'd1:   spc_shift = 3'd0;
+              8'd2:   spc_shift = 3'd1;
+              8'd4:   spc_shift = 3'd2;
+              8'd8:   spc_shift = 3'd3;
+              8'd16:  spc_shift = 3'd4;
+              8'd32:  spc_shift = 3'd5;
+              8'd64:  spc_shift = 3'd6;
+              8'd128: spc_shift = 3'd7;
+              default: begin spc_ok = 1'b0; spc_shift = 3'd0; end
+          endcase
+      end
+
+      // ★★★ 第二刀：FAT32 规定 BPB_NumFATs 恒为 2 ⇒ num_fats * fat_size = fat_size << 1
+      //   （同样是 32 位截断乘 → 32 位左移，mod 2^32 逐位等价；NumFATs!=2 由 P_BPB 守卫拦掉）
       wire [31:0] fat_start_c  = part_base + {16'd0, reserved};
-      wire [31:0] data_start_c = fat_start_c + ({24'd0, num_fats} * fat_size);
-      wire [31:0] root_dir_c   = data_start_c +
-                                 ((root_cluster - 32'd2) * {24'd0, sec_per_clus});
+      wire [31:0] data_start_c = fat_start_c + (fat_size << 1);
 
       // 扩展名是不是目标（卡上永远存大写）
       wire ext_ok = (ext0 == TARGET_EXT[23:16]) &&
@@ -103,9 +148,27 @@
       // cmd=1 的结果（0/1 是保留簇，EOC 及以上是结束，都判掉防止乘法溢出）
       wire [27:0] nxt_clus = fat_val[27:0];
       wire        nxt_end  = (nxt_clus >= 28'h0FFFFFF8) || (nxt_clus < 28'd2);
-      wire [31:0] nxt_sec  = nxt_end ? 32'd0
-                           : data_start_c +
-                             (({4'd0, nxt_clus} - 32'd2) * {24'd0, sec_per_clus});
+
+      //======================================================================
+      //  ★★★ 方案A 第三步：三个「簇号 → 扇区号」使用点分属**互斥的 FSM 相位**，
+      //     于是共用同一套「减 2 → 左移 → 加 data_start_c」通路（移位器由 3 份减到 1 份）：
+      //        root_dir_c  : S_IDLE（cmd=0 且 params_valid）与 S_CALC/P_BPB
+      //        nxt_sec     : S_CALC/P_FAT
+      //        file_sector : S_DONE（cmd=0）
+      //  为什么与原式逐位等价：FAT32 强制 sec_per_clus 是 2 的幂 ⇒ (X-2)*spc ≡ (X-2)<<log2(spc)；
+      //    原乘法处在 32 位上下文里本来就是截断乘（mod 2^32），左移同样按 32 位截断，逐位相同。
+      //  ★ 选择式里**必须**带 state==S_CALC：phase 是寄存器，做过一次 cmd=1 之后会停在 P_FAT；
+      //    若只判 phase==P_FAT，下一次 S_IDLE 取 root_dir_c 时会误选 nxt_clus
+      //    （这种错只在「先跟过一次簇链、再重新找文件」时暴露，非常隐蔽）。
+      //======================================================================
+      wire        sel_fat = (state == S_CALC) && (phase == P_FAT);
+      wire        sel_dir = (state == S_DONE);
+      wire [31:0] clu_sel = sel_fat ? {4'd0, nxt_clus} :
+                            sel_dir ? {clus_hi, clus_lo} : root_cluster;
+      wire [31:0] clu_lba = data_start_c + ((clu_sel - 32'd2) << spc_shift);
+
+      wire [31:0] root_dir_c = clu_lba;
+      wire [31:0] nxt_sec    = nxt_end ? 32'd0 : clu_lba;
       
       //======================================================================
       //  sd_top 读接口仲裁
@@ -307,6 +370,12 @@
                       state  <= S_WAIT;
                   end
                   P_BPB: begin
+                      // ★★★ 方案A 守卫：BPB 参数违反 FAT32 规范 ⇒ 明确失败，绝不静默算错地址
+                      //   （SecPerClus 必须是 2 的幂；NumFATs 必须是 2）
+                      if (!spc_ok || num_fats != 8'd2) begin
+                          state <= S_FAIL;
+                      end
+                      else begin
                       params_valid <= 1'b1;
                       dir_sec      <= 8'd0;
 
@@ -319,6 +388,7 @@
                           phase  <= P_FAT;
                       end
                       state <= S_WAIT;
+                      end
                   end
                   P_DIR: begin
                       if (found)
@@ -362,9 +432,7 @@
                   if (cmd_r == 1'b0) begin
                       file_cluster <= {clus_hi, clus_lo};
                       file_size    <= fsize;
-                      file_sector  <= data_start_c +
-                                      (({clus_hi, clus_lo} - 32'd2) *
-                                       {24'd0, sec_per_clus});
+                      file_sector  <= clu_lba;   // 见上面的共用通路（此相位 clu_sel = 命中文件的簇号）
                   end
                   sd_req <= 1'b0;
                   done   <= 1'b1;
@@ -383,27 +451,12 @@
       end
 
       //======================================================================
-      //  内部例化 sd_top
+      //  ★★★ 第②步：sd_top 已经提到 top_a（全局只有一份），这里不再例化
+      //    只把共享前端的两个「状态灯」透传出去（端口名/语义和改动前完全一样）：
+      //      led1      = sd_top.led1        （初始化完成）
+      //      bus_owner = sd_top.bus_owner   （引脚已交接 = 原来的 sd_ready）
       //======================================================================
-      sd_top u_sd_top (
-          .sys_clk   (sys_clk),
-          .clk_spi   (clk_spi),          // ★ 集成临时改动：读移位器时钟（给 100 MHz ⇒ 25 MHz）
-          .sys_rst_n (sys_rst_n),
+      assign led1      = fe_led;
+      assign bus_owner = fe_init_done;
 
-          .spi_miso  (spi_miso),
-          .spi_mosi  (spi_mosi),
-          .spi_clk   (spi_clk),
-          .spi_cs    (spi_cs),
-
-          .read_addr (w_lba),
-          .read_req  (w_req),
-          .data_out  (sd_data),
-          .read_busy (sd_busy),
-          .read_ok   (sd_ok),
-          .read_done (sd_done),
-          .read_err  (sd_err),
-
-          .led1      (led1),
-          .bus_owner (bus_owner)
-      );
   endmodule

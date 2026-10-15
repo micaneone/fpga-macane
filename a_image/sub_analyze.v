@@ -20,9 +20,11 @@
       //       ★ 文件内容仍是标准 24 位 BMP，只是改名成 .SUB。
       //         解析器只看文件头，不看文件名。
       //
-      //    ② 【SD 引脚同形】spi_miso/mosi/clk/cs 四个口和 bmp_analyze /
-      //       wav_analyze 【完全一样】，由 top_a 在引脚上三选一。
-      //       本模块自己带一套 find_bmp（内含 sd_top/sd_init），和另两条链一样。
+      //    ② 【SD 前端共享】★ 2026-10-15【第②步·减重】已改：本模块不再自己带
+      //       sd_top/sd_init（三条链原来三份逐字相同）。sd_top 现在在 top_a 里
+      //       【全局只有一份】，本模块只保留自己的 find_bmp（FAT/目录/簇链状态机）
+      //       并通过 fe_* 端口共享那份前端；`fe_owner` 保证只有 sd_mode_r 选中的
+      //       那一条链的话算数（另两条连"前端忙"都看不见）。
       //
       //    ③ 【不碰 SDRAM 写口】本模块只吐 mask_we/mask_data/mask_idx，
       //       写 SDRAM 是 sub2sdram 的事，写口仲裁在 top_a，和这里无关。
@@ -81,11 +83,17 @@
           input         sys_clk,
           input         sys_rst_n,
 
-          // ---- SD 卡引脚（和 bmp_analyze / wav_analyze 同形，top_a 三选一）----
-          input         spi_miso,
-          output        spi_mosi,
-          output        spi_clk,
-          output        spi_cs,
+          // ---- ★★★ 第②步：共享 SD 前端（sd_top 在 top_a，三条链共用那一份）----
+          input         fe_init_done,   // ← 原来 find_bmp 的 bus_owner（sd_ready）
+          input         fe_led,         // ← 原来 find_bmp 的 led1（led_init）
+          input         fe_owner,       // ★ 1 = 现在是"装字幕"这一条当家
+          output [31:0] fe_lba,         // → 共享前端 read_addr
+          output        fe_req,         // → 共享前端 read_req
+          input  [7:0]  fe_data,        // ← 读回的数据（每字节单拍 fe_ok）
+          input         fe_ok,
+          input         fe_done,
+          input         fe_busy,
+          input         fe_err,
 
           // ---- 命令 ----
           input         start,          // 拉高一拍开始
@@ -467,22 +475,19 @@
               .TARGET_EXT (TARGET_EXT)          // ★ {"S","U","B"}
           ) u_find_bmp (
               .sys_clk    (sys_clk),
-              // ★★ 2026-10-09【集成临时改动 · 修「字幕链一个字节都读不出来」】：
-              //   B 侧为了把图像链的 SD 读提速到 25 MHz，给 find_bmp / sd_top / sd_read
-              //   加了一个 `clk_spi` 口（读移位器的时钟；给 sys_clk = 原来的 12.5 MHz）。
-              //   音频链（wav_analyze）那边补过了，**A 的 sub_analyze 是新的、没补**：
-              //   于是这个口悬空 → TD 报 `SYN-5025: Using 0 for all undriven pins`
-              //   把移位时钟接成常量 0 ⇒ 字幕链一个扇区都读不出来 ⇒ sub_analyze 失败
-              //   ⇒ 板上 FAIL 灯亮、字幕永远不出现（2026-10-09 实测就是这么坏了一天）。
-              //   ★ 字幕数据量极小（6 KB），不提速，接 sys_clk 就好。
-              //   （见 规划\A轨待改清单.md；A 的分支要么补这一行，要么别用我们这份 find_bmp）
-              .clk_spi    (sys_clk),
               .sys_rst_n  (sys_rst_n),
 
-              .spi_miso   (spi_miso),
-              .spi_mosi   (spi_mosi),
-              .spi_clk    (spi_clk),
-              .spi_cs     (spi_cs),
+              // ---- ★★★ 第②步：共享 SD 前端（真正的 sd_top 在 top_a，全局一份）----
+              .fe_init_done (fe_init_done),
+              .fe_led       (fe_led),
+              .fe_owner     (fe_owner),
+              .fe_lba       (fe_lba),
+              .fe_req       (fe_req),
+              .fe_data      (fe_data),
+              .fe_ok        (fe_ok),
+              .fe_done      (fe_done),
+              .fe_busy      (fe_busy),
+              .fe_err       (fe_err),
 
               .start      (f_start),
               .cmd        (1'b0),               // 0 = 找文件

@@ -114,14 +114,11 @@ module top_m2 #(
     wire        a_wr_full, a_wr_ack, a_wr_done;   // ★ 2026-09-28 原厂协议
     wire        sdr_ready;                     // SDRAM 初始化完成（A 和自测图都要用，先声明）
 
-    // B 自测图写入器的写口
-    wire        stwr_busy, stwr_done, stwr_we, stwr_wrreq;
-    wire [20:0] stwr_base;
-    wire [20:0] stwr_len;
-    wire [31:0] stwr_data;
-    reg         stwr_start;
-    reg  [16:0] stwr_cnt;
-    reg         stwr_fired;
+    // ★★★ 2026-10-15【逐步减重 · 第①步】B 自测图写入器 `stub_a_writer` 已删除。
+    //   旧版里它的 busy 【本来就是恒 0】：复位就把 stwr_fired 置 1 ⇒ start 永不发 ⇒
+    //   它从不开机自测。所以这里改成常量 0，下游四处（写口二选一 / 读闸门 /
+    //   disp_rst_hold / 串口 flags bit3）的行为和删之前【逐拍一致】。
+    wire        stwr_busy = 1'b0;
 
     // 显示链送给 HDMI 的像素（自检模块也要用同一份）
     wire [15:0] rgb565_w;
@@ -189,8 +186,8 @@ module top_m2 #(
     wire        tr_from_white;
 
     // ---- 行探针（8 个固定行）+ 诊断计数 ----
-    wire [15:0] chk_row0, chk_row1, chk_row2, chk_row3;
-    wire [15:0] chk_row4, chk_row5, chk_row6, chk_row7;
+    // ★★★ 2026-10-15【逐步减重 · 第①步】`chk_row0..7` 是 `pix_check` 的输出，
+    //   删模块后连线一并删除（它们本来就没接到任何下游）。
     wire [15:0] lb_drop, lb_abort;
     wire [15:0] lb_off, lb_alignbad;   // 逐字对齐校验（地址图专用）
     // ---- 读口自测（★ 2026-09-27 下午换成"官方读侧"，见 rtl\vendor_read_test.v）----
@@ -200,9 +197,9 @@ module top_m2 #(
     wire [15:0] st_w0, st_w1, st_w2, st_w3;
     wire        st_rd_en_m;            // 读口二选一（下面 assign）
     wire [20:0] st_rd_addr_m;
-    reg         stwr_done_lat;
-    reg  [23:0] st_dly;
-    reg         st_go;
+    // ★★★ 2026-10-15【逐步减重 · 第①步】`stwr_done_lat / st_dly / st_go` 只服务
+    //   "自测图写完 50ms 后跑一次读口自检"，读口自检本身 2026-10-09 就删了
+    //   ⇒ 这一组是纯死逻辑，随 stub_a_writer 一起删。
 
     // ============================================================
     //  ★★★ 2026-10-05：音频链（A 轨 top_aud）的跨小节连线与命令
@@ -840,52 +837,22 @@ module top_m2 #(
     );
 
     // ============================================================
-    //  1b. B 自己的自测图写入器（只在 B_SELFTEST 打开时用）
-    //      复位后约 1ms 发一次 start，把"竖色条"图写进大槽 0
+    //  1b. 【已删除】B 自己的自测图写入器 stub_a_writer（2026-10-15 逐步减重·第①步）
     // ============================================================
-    always @(posedge clk or negedge sys_rst_n) begin
-        if (!sys_rst_n) begin
-            stwr_cnt   <= 17'd0;
-            stwr_start <= 1'b0;
-        // ★★ 2026-09-28 第三轮（测量版）：**重新打开开机自测图**，
-        //    而且图案换成 PAT_MODE=2（一个字的两个像素都 = 这个字的字地址）。
-        //    屏上会是一张"自描述"的图：串口探针读到的每个数，
-        //    低 16 位直接就是"哪个字"，错位/重复/串行一眼可判；
-        //    而且行缓冲的"本趟几个字对不上"（badwords）这时候才有意义：
-        //    它 = 0 就说明这一趟 320 个字全部落对位置。
-            // ★★ 2026-09-28 第五轮（量完之后）：**关掉开机自测图**，
-            //    让 A 把卡里那张真图装进来 —— 这一版是要"看真图"。
-            //    （要回去做地址图测量：把这行改回 1'b0，并把下面 astart_fired
-            //      改回 1'b1，同时把 stub_a_writer 的 PAT_MODE 保持 2。）
-            stwr_fired <= 1'b1;
-        end
-        else begin
-            stwr_start <= 1'b0;
-            if (!stwr_fired) begin
-                if (stwr_cnt >= 17'd50000) begin      // 约 1ms @50MHz
-                    stwr_start <= 1'b1;
-                    stwr_fired <= 1'b1;
-                end
-                else stwr_cnt <= stwr_cnt + 17'd1;
-            end
-        end
-    end
-
-    stub_a_writer #(
-        // ★★ 2026-09-28：只写【显示要用的那 480 行】= 640x480。
-        //   原来写整槽(2909 行)要 26ms，那段时间显示必须让位，屏幕会长时间空着；
-        //   现在只写 76,800 字（板子上约 2ms、仿真里 1.6ms），够显示用，
-        //   而且和"卡里那张 640x480 真图"占的区域完全一样。
-        .PAGE_W(640), .PAGE_H(480), .BASE(0), .PAT_MODE(2)
-    ) u_self (
-        .clk_ctl(clk), .rst_ctl_n(sys_rst_n),
-        .start(stwr_start), .pack_swap(1'b0),
-        .sdr_ready(sdr_ready),
-        .done(stwr_done), .busy(stwr_busy),
-        .a_wr_req(stwr_wrreq), .a_wr_base(stwr_base), .a_wr_len(stwr_len),
-        .a_wr_ack(a_wr_ack), .a_wr_data(stwr_data), .a_wr_we(stwr_we),
-        .a_wr_full(a_wr_full), .a_wr_done(a_wr_done)
-    );
+    //  被删掉的东西：
+    //    · `always` 块（stwr_cnt / stwr_start / stwr_fired 的产生器）
+    //    · `stub_a_writer #(.PAGE_W(640),.PAGE_H(480),.PAT_MODE(2)) u_self`
+    //  为什么删了行为不变（三条硬证据）：
+    //    ① 复位分支里写死 `stwr_fired <= 1'b1`（"关掉开机自测图，让 A 装真图"），
+    //       ⇒ `!stwr_fired` 分支永不执行 ⇒ `stwr_start` 恒 0 ⇒ 该模块**从不上电自检**，
+    //         `stwr_busy` 恒 0、`stwr_done` 恒 0（上板早就如此）。
+    //    ② 写口二选一按 `stwr_busy` 选（见下面第 2b 节）⇒ 一直选的就是 A 的真实图。
+    //    ③ 它的 8 个输出里 6 个（a_wr_*）只进那个二选一；剩下 busy/done 只进
+    //       "读闸门 / disp_rst_hold / 串口 flags bit3 / 那个 50ms 延时器"，
+    //       而那个延时器的唯一消费者 `st_go` 早在 2026-10-09 读口自检删除后就死了。
+    //  ⇒ 现在 `stwr_busy` 是常量 0，所有这些下游取值与删之前完全相同。
+    //  ★ 要恢复：`git show HEAD:rtl/top_m2.v`（搜 stub_a_writer）把这段放回来，
+    //    并把 prj\M2.al 里那条 <File Path="../rtl/stub_a_writer.v"> 加回去。
 
     // ============================================================
     //  2. A 的装载机（SD → BMP → 565 → SDRAM 写口 + 描述符）
@@ -1074,14 +1041,17 @@ module top_m2 #(
 `endif
 
 
-    // ★ 写口仲裁：B 自测图正在写的时候，写口归它；其它时候归 A
-    //   （两者不会同时写：自测图写完才允许 key1 触发 A 装载，
-    //     见 stub_ctrl 的 hold 输入）
-    wire        wr_req_m  = stwr_busy ? stwr_wrreq : a_wr_req;
-    wire [20:0] wr_base_m = stwr_busy ? stwr_base  : a_wr_base;
-    wire [20:0] wr_len_m  = stwr_busy ? stwr_len   : a_wr_len;
-    wire [31:0] wr_data_m = stwr_busy ? stwr_data  : a_wr_data;
-    wire        wr_we_m   = stwr_busy ? stwr_we    : a_wr_we;
+    // ★★★ 2026-10-15【逐步减重 · 第①步】"自测图 vs 真实图"的写口二选一已拆掉，
+    //   写口**固定接真实图通路**（A 的 bmp→SDRAM）。
+    //   为什么等价：选择信号 `stwr_busy` 原本恒 0（自测图写入器从不上电自检），
+    //   所以这 5 个三目运算符的结果**一直就是** a_wr_* 这一支。
+    //   ★ 要恢复自测图档：把 `stwr_busy ? stwr_* : a_wr_*` 写回来，并恢复
+    //     stub_a_writer 例化与 M2.al 条目（见上面第 1b 节的说明）。
+    wire        wr_req_m  = a_wr_req;
+    wire [20:0] wr_base_m = a_wr_base;
+    wire [20:0] wr_len_m  = a_wr_len;
+    wire [31:0] wr_data_m = a_wr_data;
+    wire        wr_we_m   = a_wr_we;
 
     // ★ 存储本体的 App 接口（顶层例化 sdram，sdr_arb 只把信号引出来）
     wire        sdr_wr_en;
@@ -1485,23 +1455,12 @@ module top_m2 #(
     end
 
     // ============================================================
-    //  3b. 读口自测（M0 读法的移植）—— 开机自测图写完 + 50ms 之后跑一次
-    //      ★ 它跑的时候占着读口（显示那边那几十微秒的行会黑一下，随后自愈）
+    //  3b. 【已删除】读口自测的"自测图写完后 50ms 触发"延时器
+    //      （2026-10-15 逐步减重·第①步）—— 它等的是 `stwr_done`（自测图写入器），
+    //      而写入器在上板配置里从不上电自检（stwr_fired 复位即 1）⇒ 这段从来没跑过；
+    //      它唯一的消费者 `st_go` 也早在 2026-10-09 读口自检被删后就死了。
+    //      下面 1473 行起就是那次"删读口自检"的原文说明。
     // ============================================================
-    always @(posedge clk or negedge sys_rst_n) begin
-        if (!sys_rst_n) begin
-            stwr_done_lat <= 1'b0;
-            st_dly        <= 24'd0;
-            st_go         <= 1'b0;
-        end
-        else begin
-            if (stwr_done) stwr_done_lat <= 1'b1;
-            if (stwr_done_lat && !st_go) begin
-                if (st_dly >= 24'd2_500_000) st_go <= 1'b1;   // ≈50ms @50MHz
-                else                         st_dly <= st_dly + 24'd1;
-            end
-        end
-    end
 
     // ======================================================================
     //  ★★★ 2026-10-09【集成临时改动 · 省面积】**删掉读口自检 u_selftest**
@@ -1806,27 +1765,19 @@ module top_m2 #(
     );
 
     // ============================================================
-    //  5b. 【送到 HDMI 的像素】逐像素自检
-    //      和自测图（stub_a_writer PAT_MODE=1）比对：
-    //        R=000000 → 显示链吐出来的就是那张自测图
-    //        R 很大   → 读出来/搬过来的东西是错的，看 G/E
+    //  5b. 【已删除】逐像素自检 `pix_check`（2026-10-15 逐步减重·第①步）
     // ============================================================
-    wire [23:0] chk_cmp, chk_bad;
-    wire [15:0] chk_got, chk_exp;
-    wire [9:0]  chk_u;
-    wire [8:0]  chk_v;
-
-    pix_check #(
-        .WIN_X0(80), .WIN_Y0(60), .WIN_W(640), .WIN_H(480),
-        .PAT_MODE(2)
-    ) u_chk (
-        .clk_pix(clk_pix), .rst_pix_n(sys_rst_n),
-        .de(de_w), .x(dbg_x), .y(dbg_y), .rgb565(rgb565_w),
-        .o_cmp(chk_cmp), .o_bad(chk_bad), .o_got(chk_got), .o_exp(chk_exp),
-        .o_u(chk_u), .o_v(chk_v),
-        .o_row0(chk_row0), .o_row1(chk_row1), .o_row2(chk_row2), .o_row3(chk_row3),
-        .o_row4(chk_row4), .o_row5(chk_row5), .o_row6(chk_row6), .o_row7(chk_row7)
-    );
+    //  它做的唯一一件事：拿 HDMI 上真实的 rgb565_w 和"自测图期望值"逐像素比。
+    //  为什么删了**什么都不会少**（硬证据）：
+    //    · 它的 11 个输出（chk_cmp/chk_bad/chk_got/chk_exp/chk_u/chk_v + chk_row0..7）
+    //      在整个工程里**一个下游都没有** —— 既不进 dbg_report，也不进数码管、
+    //      不进任何显示/字幕/音频通路（这就是一颗纯悬空的比较器）；
+    //    · 它是【只读】模块：输入只有 clk_pix/de_w/dbg_x/dbg_y/rgb565_w，没有输出接回设计。
+    //    · 期望值按自测图（PAT_MODE=2）算，而屏上早就是真图 ⇒ 读数本来就没意义
+    //      （顶层第 2183 行附近的老注释也这么写着）。
+    //  ★ 要恢复：`git show HEAD:rtl/top_m2.v`（搜 pix_check）把例化放回来，
+    //    并把 prj\M2.al 里那条 <File Path="../rtl/pix_check.v"> 加回去。
+    // ============================================================
 
     // ============================================================
     //  6. LED：一眼看出卡在哪一步
@@ -2081,7 +2032,9 @@ module top_m2 #(
                             //   （LOAD_WITH_READS 打开时 = mem_rd_ok，
                             //    关掉时 = disp_rd_en_g，两种口径都是"能不能读"）
         disp_rd_en,         // bit4  ★ 显示想不想读
-        stwr_busy,          // bit3  ★ 自测图写入器还在忙吗
+        1'b0,               // bit3  ★ 2026-10-15【逐步减重·第①步】：原接 stwr_busy
+                            //   （"自测图写入器还在忙吗"）——该模块已删，且它原本恒 0
+                            //   ⇒ 这一位读数与改前完全一致（帧格式/字段数一字未动）。
         a_busy,             // bit2
         sdr_ready,          // bit1
         a_sd_ready          // bit0

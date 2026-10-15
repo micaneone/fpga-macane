@@ -44,17 +44,19 @@
       parameter integer BITS_REQ = 16
   )(
       input         sys_clk,
-      // ★★ 2026-10-08【集成临时改动 · 提速到 25 MHz】：读移位器时钟（透传给 find_bmp）。
-      //   ★ 音频这条链暂时【仍给 sys_clk】⇒ 行为与改动前逐位相同（只有 288 KB、0.19 s，
-      //     不值得为它多担一次风险）。要一起提速，只要在 top_a 把这里改成 clk_spi 即可。
-      input         clk_spi,
       input         sys_rst_n,
 
-      // ---- SD 卡引脚（透传给内部 find_bmp）----
-      input         spi_miso,
-      output        spi_mosi,
-      output        spi_clk,
-      output        spi_cs,
+      // ---- ★★★ 第②步：共享 SD 前端（sd_top 在 top_a，三条链共用那一份）----
+      input         fe_init_done,   // ← 原来 find_bmp 的 bus_owner（sd_ready）
+      input         fe_led,         // ← 原来 find_bmp 的 led1（led_init）
+      input         fe_owner,       // ★ 1 = 现在是"装音频"这一条当家
+      output [31:0] fe_lba,         // → 共享前端 read_addr
+      output        fe_req,         // → 共享前端 read_req
+      input  [7:0]  fe_data,        // ← 读回的数据（每字节单拍 fe_ok）
+      input         fe_ok,
+      input         fe_done,
+      input         fe_busy,
+      input         fe_err,
 
       // ---- 命令 ----
       input         start,          // 拉高一拍开始
@@ -483,13 +485,19 @@
           .TARGET_EXT (TARGET_EXT)
       ) u_find_bmp (
           .sys_clk    (sys_clk),
-          .clk_spi    (clk_spi),        // ★ 集成临时改动：音频链暂仍接 sys_clk（见端口注释）
           .sys_rst_n  (sys_rst_n),
 
-          .spi_miso   (spi_miso),
-          .spi_mosi   (spi_mosi),
-          .spi_clk    (spi_clk),
-          .spi_cs     (spi_cs),
+          // ---- ★★★ 第②步：共享 SD 前端（真正的 sd_top 在 top_a，全局一份）----
+          .fe_init_done (fe_init_done),
+          .fe_led       (fe_led),
+          .fe_owner     (fe_owner),
+          .fe_lba       (fe_lba),
+          .fe_req       (fe_req),
+          .fe_data      (fe_data),
+          .fe_ok        (fe_ok),
+          .fe_done      (fe_done),
+          .fe_busy      (fe_busy),
+          .fe_err       (fe_err),
 
           .start      (f_start),
           .cmd        (1'b0),           // 0 = 找文件

@@ -25,9 +25,13 @@
         //      sd_mode = 0 → 装图     1 → 装音频     2 → 装字幕
         //
         //    ┌── ① SD 卡引脚 ───────────────────────────────────────────┐
-        //    │ 三个模块各自带一套 find_bmp→sd_top→my_spi ✗              │
-        //    │ ⇒ spi_clk / spi_mosi / spi_cs 必须【三选一】             │
-        //    │   spi_miso 是输入，广播给三个，不冲突                    │
+        //    │ ★★★ 2026-10-15【第②步·减重】已改：sd_top 全局【只有一份】│
+        //    │   原来三条链各带一套 find_bmp→sd_top→my_spi，靠三行 mux   │
+        //    │   抢引脚（≈2.9k LUT 就这么来的）。现在：                 │
+        //    │     · 引脚直连那唯一一份 sd_top，不用 mux；              │
+        //    │     · 请求按 sd_mode_r 三选一进前端；                     │
+        //    │     · 应答广播，但 find_bmp 里用 fe_owner 屏蔽 ——        │
+        //    │       非主链连"前端忙"都看不见。                         │
         //    └──────────────────────────────────────────────────────────┘
         //
         //    ┌── ② SDRAM 写口 ──────────────────────────────────────────┐
@@ -176,10 +180,16 @@
             wire        sub_info_valid;
             wire        sub2sdram_busy, sub_wr_done_p;
 
-            // ---- SPI 三根输出：三选一 ----
-            wire bmp_mosi, bmp_clk, bmp_cs;
-            wire wav_mosi, wav_clk, wav_cs;
-            wire sub_mosi, sub_clk, sub_cs;
+            // ---- ★★★ 第②步：共享 SD 前端（三条链共用本文件里唯一那份 sd_top）----
+            //   每条链一组请求出口 + 一组广播回来的应答/状态
+            wire [31:0] fe_lba_bmp, fe_lba_wav, fe_lba_sub;
+            wire        fe_req_bmp, fe_req_wav, fe_req_sub;
+            wire [31:0] fe_lba;          // 按 sd_mode_r 三选一 → sd_top.read_addr
+            wire        fe_req;          // 按 sd_mode_r 三选一 → sd_top.read_req
+            wire [7:0]  fe_data;         // ← sd_top.data_out（广播给三条链）
+            wire        fe_ok, fe_done, fe_busy, fe_err;
+            wire        fe_init_done;    // ← sd_top.bus_owner
+            wire        fe_led;          // ← sd_top.led1
 
             // ---- 图像写口 ----
             wire        bm_req, bm_we;
@@ -223,21 +233,53 @@
             wire mode_is_wav = (sd_mode_r == 2'd1);
             wire mode_is_sub = (sd_mode_r == 2'd2);
 
-            // ---- ① SPI 三根输出：三选一 ----
-            assign spi_mosi = mode_is_sub ? sub_mosi :
-                              mode_is_wav ? wav_mosi : bmp_mosi;
-            assign spi_clk  = mode_is_sub ? sub_clk  :
-                              mode_is_wav ? wav_clk  : bmp_clk;
-            assign spi_cs   = mode_is_sub ? sub_cs   :
-                              mode_is_wav ? wav_cs   : bmp_cs;
-            // ★ spi_miso 是【输入】，不用 mux —— 广播给三个
-
             // ---- ② SDRAM 写口：三选一（ack/full/done 广播给三个）----
             assign a_wr_req  = mode_is_sub ? sb_req  : (mode_is_wav ? wv_req  : bm_req);
             assign a_wr_base = mode_is_sub ? sb_base : (mode_is_wav ? wv_base : bm_base);
             assign a_wr_len  = mode_is_sub ? sb_len  : (mode_is_wav ? wv_len  : bm_len);
             assign a_wr_data = mode_is_sub ? sb_data : (mode_is_wav ? wv_data : bm_data);
             assign a_wr_we   = mode_is_sub ? sb_we   : (mode_is_wav ? wv_we   : bm_we);
+
+            // ---- ① SD 卡引脚：★ 不再需要"三选一 mux"（前端只有一份）----
+            //   ★★★ 2026-10-15【第②步 · 减重】：原来三条链各带一份
+            //     find_bmp→sd_top(含 sd_init/sd_read_cdc/sd_read/my_spi)，三份逐字相同，
+            //     只靠三行 mux 抢引脚 —— 那正是"三份 SD 前端 ≈2.9k LUT"的来源。
+            //   现在把 sd_top 提出成【只例化一份】`u_sd_front`，三条链的 find_bmp 共享它：
+            //     · 请求：按 `sd_mode_r` 三选一 ⇒ 只有当家那条链的请求能到前端；
+            //     · 应答/状态：广播给三条，但 find_bmp 内部用 fe_owner 屏蔽 ——
+            //       非主链连"前端忙"都看不见，绝不会把主链的字节当成自己的。
+            //   ★ 为什么"不会在事务中途换主"（红线）：
+            //     ① `sd_mode_r` 的锁存条件一个字没改 = `start && !sd_busy`，
+            //        而 sd_busy = bmp_busy|wav_busy|sub_busy 覆盖三条链【整段】SD 活动
+            //        ⇒ 换主只可能发生在"上一条链已 done/fail、三条链 busy 全 0"之后；
+            //     ② 新主自己还要先在 find_bmp 的 S_WAIT 等 `!sd_busy`（= 前端电平）
+            //        才敢举 fe_req ⇒ 就算前端刚巧还在收尾上一条的最后一块，也等它落下来。
+            assign fe_lba = mode_is_sub ? fe_lba_sub :
+                            mode_is_wav ? fe_lba_wav : fe_lba_bmp;
+            assign fe_req = mode_is_sub ? fe_req_sub :
+                            mode_is_wav ? fe_req_wav : fe_req_bmp;
+
+            sd_top u_sd_front (
+                .sys_clk   (sys_clk),
+                .clk_spi   (sys_clk),        // ★ 与改动前逐位相同：三条链原来都接 sys_clk（SCLK 12.5 MHz）
+                .sys_rst_n (sys_rst_n),
+
+                .spi_miso  (spi_miso),
+                .spi_mosi  (spi_mosi),
+                .spi_clk   (spi_clk),
+                .spi_cs    (spi_cs),
+
+                .read_addr (fe_lba),
+                .read_req  (fe_req),
+                .data_out  (fe_data),
+                .read_busy (fe_busy),
+                .read_ok   (fe_ok),
+                .read_done (fe_done),
+                .read_err  (fe_err),
+
+                .led1      (fe_led),
+                .bus_owner (fe_init_done)
+            );
 
             // ---- start 分发给谁（★ 用组合的 sd_mode，不是寄存过的）----
             wire bmp_start = start & (sd_mode == 2'd0);
@@ -292,13 +334,19 @@
             //======================================================================
             bmp_analyze u_bmp_analyze (
                 .sys_clk    (sys_clk),
-        // ★★★ 2026-10-15【补线】新版 top_a 端口表已无 clk_spi，但 bmp_analyze 仍需要它做 SD 读时钟；不接即悬空 ⇒ SD 全不动。接 50 MHz sys_clk（SCLK 12.5 MHz，回到 2026-10-08 提速前速率）。
-        .clk_spi(sys_clk),
                 .sys_rst_n  (sys_rst_n),
-                .spi_miso   (spi_miso),          // ★ 广播（输入）
-                .spi_mosi   (bmp_mosi),          // ★ 不直接接引脚
-                .spi_clk    (bmp_clk),
-                .spi_cs     (bmp_cs),
+
+                // ---- ★★★ 第②步：共享 SD 前端（真正的 sd_top 见上面 u_sd_front）----
+                .fe_init_done (fe_init_done),
+                .fe_led       (fe_led),
+                .fe_owner     (mode_is_bmp),     // ★ 只有"装图"这一条当家
+                .fe_lba       (fe_lba_bmp),
+                .fe_req       (fe_req_bmp),
+                .fe_data      (fe_data),
+                .fe_ok        (fe_ok),
+                .fe_done      (fe_done),
+                .fe_busy      (fe_busy),
+                .fe_err       (fe_err),
                 .start      (bmp_start),         // ★ 只在装图那一拍给
                 .skip       (skip),
                 .busy       (bmp_busy),
@@ -371,14 +419,19 @@
                 .TARGET_EXT ({"W","A","V"})
             ) u_wav_analyze (
                 .sys_clk      (sys_clk),
-        // ★★★ 2026-10-15【补线】同上：wav_analyze 仍需要 clk_spi 做 SD 读时钟。
-        .clk_spi(sys_clk),
                 .sys_rst_n    (sys_rst_n),
 
-                .spi_miso     (spi_miso),        // ★ 广播（输入）
-                .spi_mosi     (wav_mosi),        // ★ 不直接接引脚
-                .spi_clk      (wav_clk),
-                .spi_cs       (wav_cs),
+                // ---- ★★★ 第②步：共享 SD 前端 ----
+                .fe_init_done (fe_init_done),
+                .fe_led       (fe_led),
+                .fe_owner     (mode_is_wav),     // ★ 只有"装音频"这一条当家
+                .fe_lba       (fe_lba_wav),
+                .fe_req       (fe_req_wav),
+                .fe_data      (fe_data),
+                .fe_ok        (fe_ok),
+                .fe_done      (fe_done),
+                .fe_busy      (fe_busy),
+                .fe_err       (fe_err),
 
                 .start        (wav_start),       // ★ 只在装音频那一拍给
                 .skip         (skip),
@@ -452,10 +505,17 @@
                 .sys_clk        (sys_clk),
                 .sys_rst_n      (sys_rst_n),
 
-                .spi_miso       (spi_miso),      // ★ 广播（输入）
-                .spi_mosi       (sub_mosi),      // ★ 不直接接引脚
-                .spi_clk        (sub_clk),
-                .spi_cs         (sub_cs),
+                // ---- ★★★ 第②步：共享 SD 前端 ----
+                .fe_init_done   (fe_init_done),
+                .fe_led         (fe_led),
+                .fe_owner       (mode_is_sub),   // ★ 只有"装字幕"这一条当家
+                .fe_lba         (fe_lba_sub),
+                .fe_req         (fe_req_sub),
+                .fe_data        (fe_data),
+                .fe_ok          (fe_ok),
+                .fe_done        (fe_done),
+                .fe_busy        (fe_busy),
+                .fe_err         (fe_err),
 
                 .start          (sub_start),     // ★ 只在装字幕那一拍给
                 .skip           (skip),          // ★ 在 .SUB 里数第几个
