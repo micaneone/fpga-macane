@@ -680,7 +680,6 @@ module top_m2 #(
 
     // 全设计的复位：引脚复位 + PLL 稳定确认（已锁存）+ 软复位
     wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
-
     // ============================================================
     //  ★★★ 2026-10-21【D3 · C1】SD 卡"拔掉再插回"自动恢复
     // ------------------------------------------------------------
@@ -704,6 +703,8 @@ module top_m2 #(
     reg         a_recover;       // 1 = 正在给 A 轨复位
     reg  [3:0]  a_recover_dly;   // 复位脉宽（8 拍 ≫ 同步器需要的 2 拍）
 
+    // ★ 看门狗的输出：声明放这儿，真正的 always 块在后面（要等 _dbg_* 声明之后）
+    reg         a_stall;         // ← 由后面 C1b 看门狗驱动（声明必须在这里，FSM 要用）
     wire sd_need_retry = ~a_sd_ready & ~a_busy & pll_ok_reg & rst_n;
 
     always @(posedge clk or negedge rst_n) begin
@@ -712,18 +713,18 @@ module top_m2 #(
             a_recover     <= 1'b0;
             a_recover_dly <= 4'd0;
         end
-        else if (sd_need_retry) begin
-            a_recover_dly <= 4'd0;
-            if (sd_retry_cnt >= SD_RETRY_TICKS) begin
-                sd_retry_cnt  <= 25'd0;
+        else begin
+            // ① "没卡"计数器：只在 A 轨空闲且卡未就绪时累加
+            if (sd_need_retry) sd_retry_cnt <= sd_retry_cnt + 25'd1;
+            else               sd_retry_cnt <= 25'd0;
+
+            // ② 复位请求：到点重试 **或** 看门狗判定吊死（C1b）
+            if (a_stall || (sd_need_retry && (sd_retry_cnt >= SD_RETRY_TICKS))) begin
                 a_recover     <= 1'b1;
                 a_recover_dly <= 4'd8;
+                sd_retry_cnt  <= 25'd0;      // 后写优先：请求那拍把计数器一起清掉
             end
-            else sd_retry_cnt <= sd_retry_cnt + 25'd1;
-        end
-        else begin
-            sd_retry_cnt <= 25'd0;
-            if (a_recover_dly != 4'd0) begin
+            else if (a_recover_dly != 4'd0) begin
                 a_recover_dly <= a_recover_dly - 4'd1;
                 a_recover     <= 1'b1;
             end
@@ -733,6 +734,7 @@ module top_m2 #(
 
     // A 轨专用复位：全设计复位 + 本模块的自动重试脉冲
     wire a_rst_n = sys_rst_n & ~a_recover;
+
 
     // ============================================================
     //  ★★★ 2026-10-14 深夜【开关3 切音频】—— SW3（拨码/乒乓开关）消抖，双边沿
@@ -2310,6 +2312,61 @@ module top_m2 #(
     wire        fs_bad_w    = fail_latch & ~load_done_latch;
     wire        fs_ld_w     = ~load_done_latch;
 
+
+    // ============================================================
+    //  ★★★ 2026-10-21 晚【D3 · C1b】播放中拔卡 → 装载线程会"吊死"，必须看门狗
+    // ------------------------------------------------------------
+    //  上板实测（用户 2026-10-20 21:49）：**先插卡上电、再拔卡、再插回** ⇒ 卡住不动。
+    //  机理：`sd_init` 只在上电跑一次，`a_sd_ready` 会一直是 1 ⇒ 上面那套"没卡就重试"
+    //        根本不会触发；而拔卡时若正有一笔 SD 读在跑，`sd_read` 等不到数据就
+    //        **永远等下去**（SPI 上没有超时）⇒ `a_busy` 卡在 1 ⇒ 轮播停住、屏幕冻住。
+    //  做法：**按"有没有进展"判活**，而不是按时间判活。
+    //    · 四个进度计数（像素/图像字数/字幕字数/音频字数）任意一个在动 ⇒ 活着；
+    //    · 连续 `A_STALL_MS` 一个都不动、而且 `a_busy=1` ⇒ 判定吊死，打一拍 `a_stall`；
+    //    · `a_stall` 直接复用上一条的 `a_recover` 通道（复位 A 轨）⇒ 复位后
+    //      `a_sd_ready` 自然落 0 ⇒ 兜底页显示 NO SD CARD ⇒ 卡插回来由 500 ms 重试接住。
+    //  ★ 为什么是 2 s 而不是 500 ms：`find_bmp` 翻簇/翻根目录时**不产生像素**，
+    //    大目录下可能几百毫秒没有任何计数变化，判太紧会在正常装载时误杀。
+    //  ★ 只取低字节/低半字比较（够用且省触发器）：低位变化最快，看门狗只需要"变没变"。
+    // ============================================================
+    localparam integer A_STALL_MS    = 2000;
+    localparam [26:0]  A_STALL_TICKS = A_STALL_MS * 50_000;     // 50 MHz ⇒ 100,000,000
+
+    reg  [26:0] a_stall_cnt;
+    reg  [15:0] a_px_prev, a_wr_prev;
+    reg  [7:0]  a_sub_prev, a_wav_prev;
+    // （a_stall 的声明在上面 FSM 之前，这里只驱动）
+
+    wire a_prog_chg = (a_dbg_px_cnt[15:0]    != a_px_prev)  ||
+                      (a_dbg_wr_cnt[15:0]    != a_wr_prev)  ||
+                      (a_dbg_sub_wr_cnt[7:0] != a_sub_prev) ||
+                      (a_dbg_wav_cnt[7:0]    != a_wav_prev);
+
+    always @(posedge clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin
+            a_stall_cnt <= 27'd0;
+            a_stall     <= 1'b0;
+            a_px_prev   <= 16'd0;
+            a_wr_prev   <= 16'd0;
+            a_sub_prev  <= 8'd0;
+            a_wav_prev  <= 8'd0;
+        end
+        else begin
+            a_stall    <= 1'b0;
+            a_px_prev  <= a_dbg_px_cnt[15:0];
+            a_wr_prev  <= a_dbg_wr_cnt[15:0];
+            a_sub_prev <= a_dbg_sub_wr_cnt[7:0];
+            a_wav_prev <= a_dbg_wav_cnt[7:0];
+            if (!a_busy || a_prog_chg)
+                a_stall_cnt <= 27'd0;
+            else if (a_stall_cnt >= A_STALL_TICKS) begin
+                a_stall_cnt <= 27'd0;
+                a_stall     <= 1'b1;
+            end
+            else
+                a_stall_cnt <= a_stall_cnt + 27'd1;
+        end
+    end
     // ============================================================
     //  ★★★ 2026-10-21【D3 · C2/C3】失败原因：{音频格式, 图像格式}
     // ------------------------------------------------------------
