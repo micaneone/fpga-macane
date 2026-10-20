@@ -125,6 +125,10 @@ module disp_top #(
     //   ★ 插在**合成器之后、可视化/字幕之前** ⇒ 它是最底层，字幕/菜单照样盖在上面。
     input  wire        fs_on,
     input  wire [1:0]  fs_state,
+    // ★★★ 2026-10-21【D3 · C2/C3】失败原因：bit0 = 图像格式（非 24 位 BMP），
+    //   bit1 = 音频格式（非 48 kHz / 非 16 位）。兜底页据此把第二行换成
+    //   NEED 24BIT BMP / NEED 48KHZ WAV，否则现场只能看到干巴巴的 BAD IMAGE。
+    input  wire [1:0]  fs_hint,
     // ★★★ 2026-10-17【音频可视化（队友 viz_top）】：音频域那几根直接从顶层引进来。
     //   `aud_vld/aud_dout/aud_next` 是 `top_aud` 的**只读**握手副本（viz 只旁听，
     //   绝不驱动 aud_next —— 驱动了就是重复消费、音频会断，见队友文档 §5③）。
@@ -472,6 +476,7 @@ module disp_top #(
         .y_in     (o_dbg_y),
         .fs_on    (fs_on),
         .fs_state (fs_state),
+        .fs_hint  (fs_hint),
         .px_in    (px_mix),
         .px_out   (px_bg)
     );

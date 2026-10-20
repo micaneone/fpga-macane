@@ -68,7 +68,10 @@
       output     [31:0] dbg_px_cnt,      // 已输出像素数，正常 == W*H
       output     [31:0] dbg_data_off,    // 从文件头读出的数据起点
       output     [15:0] dbg_first_px,    // 第一个像素的【完整 RGB888】（调试用）
-      output     [31:0] dbg_first_addr   // 第一个像素的地址（期望 (H-1)*W）
+      output     [31:0] dbg_first_addr,  // 第一个像素的地址（期望 (H-1)*W）
+      // ★★★ 2026-10-21【D3 · C3】位深单独引出：32 位 BMP 以前只会静默失败，
+      //   兜底页要靠它写出 "NEED 24BIT BMP"，否则现场只会看到 "BAD IMAGE" 再猜。
+      output reg [15:0] bmp_bpp          // 位深（第 28~29 字节；24 = 唯一支持的格式）
   );
 
       //======================================================================
@@ -133,7 +136,7 @@
       reg [31:0] bmp_data_off;    // 像素数据起点（第 10~13 字节）
       reg [31:0] bmp_width;       // 宽（第 18~21 字节）
       reg [31:0] bmp_height;      // 高（第 22~25 字节）
-      reg [15:0] bmp_bpp;         // 位深（第 28~29 字节）
+      // bmp_bpp 已改成输出端口（见模块头，D3 · C3）
       reg        bm_ok;           // 开头是不是 "BM"
       reg        hdr_ready;       // 头解完了
       reg        hdr_bad;         // 头里有问题

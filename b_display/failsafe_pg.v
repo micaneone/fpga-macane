@@ -58,6 +58,9 @@ module failsafe_pg #(
     // ---------------- 状态（来自顶层，像素域同步副本）----------------
     input  wire        fs_on,          // 1 = 出兜底页；0 = 逐位透传（正常出图）
     input  wire [1:0]  fs_state,       // 0=OK 1=LOADING 2=BAD_IMG 3=NO_CARD
+    // ★★★ 2026-10-21【D3 · C2/C3】失败原因：bit0 = 图像格式（非 24 位 BMP），
+    //   bit1 = 音频格式（非 48 kHz / 非 16 位）。非零时第 2 行改成"要什么格式"。
+    input  wire [1:0]  fs_hint,
 
     // ---------------- 像素 ----------------
     input  wire [15:0] px_in,
@@ -214,27 +217,53 @@ module failsafe_pg #(
                     end
                 endcase
             end
-            // ---- 行2：固件/日期 "FW 3.0  2026-10-20"（17 字符，常数）----
+            // ---- 行2：固件/日期 "FW 3.0  2026-10-21"（17 字符，常数）----
+            //   ★ 2026-10-21【D3 · C2/C3】失败原因非零时，这一行改讲"要什么格式"，
+            //     比印固件版本有用得多：
+            //       hint[0] = "NEED 24BIT BMP"  (14 字符)
+            //       hint[1] = "NEED 48KHZ WAV"  (14 字符)
+            //     两条同长、同起点，只差 3 个字符位，用同一个 case 按位选。
             default: begin
-                case (ci2)
-                    4'd0:  ch_a = "F";
-                    4'd1:  ch_a = "W";
-                    4'd2:  ch_a = " ";
-                    4'd3:  ch_a = "3";
-                    4'd4:  ch_a = ".";
-                    4'd5:  ch_a = "0";
-                    4'd6:  ch_a = " ";
-                    4'd7:  ch_a = " ";
-                    4'd8:  ch_a = "2";
-                    4'd9:  ch_a = "0";
-                    4'd10: ch_a = "2";
-                    4'd11: ch_a = "6";
-                    4'd12: ch_a = "-";
-                    4'd13: ch_a = "1";
-                    4'd14: ch_a = "0";
-                    4'd15: ch_a = "-";
-                    default: ch_a = "2";
-                endcase
+                if (fs_hint != 2'd0) begin
+                    case (ci2)
+                        4'd0:  ch_a = "N";
+                        4'd1:  ch_a = "E";
+                        4'd2:  ch_a = "E";
+                        4'd3:  ch_a = "D";
+                        4'd4:  ch_a = " ";
+                        4'd5:  ch_a = fs_hint[0] ? "2" : "4";
+                        4'd6:  ch_a = fs_hint[0] ? "4" : "8";
+                        4'd7:  ch_a = fs_hint[0] ? "B" : "K";
+                        4'd8:  ch_a = fs_hint[0] ? "I" : "H";
+                        4'd9:  ch_a = fs_hint[0] ? "T" : "Z";
+                        4'd10: ch_a = " ";
+                        4'd11: ch_a = fs_hint[0] ? "B" : "W";
+                        4'd12: ch_a = fs_hint[0] ? "M" : "A";
+                        4'd13: ch_a = fs_hint[0] ? "P" : "V";
+                        default: ch_a = " ";
+                    endcase
+                end
+                else begin
+                    case (ci2)
+                        4'd0:  ch_a = "F";
+                        4'd1:  ch_a = "W";
+                        4'd2:  ch_a = " ";
+                        4'd3:  ch_a = "3";
+                        4'd4:  ch_a = ".";
+                        4'd5:  ch_a = "0";
+                        4'd6:  ch_a = " ";
+                        4'd7:  ch_a = " ";
+                        4'd8:  ch_a = "2";
+                        4'd9:  ch_a = "0";
+                        4'd10: ch_a = "2";
+                        4'd11: ch_a = "6";
+                        4'd12: ch_a = "-";
+                        4'd13: ch_a = "1";
+                        4'd14: ch_a = "0";
+                        4'd15: ch_a = "-";
+                        default: ch_a = "1";
+                    endcase
+                end
             end
         endcase
     end

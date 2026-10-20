@@ -164,7 +164,16 @@
             // ---------------- 诊断：字幕 ----------------
             output [31:0] dbg_sub_wr_cnt,   // 字幕写了多少字，正常 == 1600
             output        dbg_sub_overrun,  // 字幕丢字，不能亮
-            output        dbg_sub_short     // 字幕字数对不上，不能亮
+            output        dbg_sub_short,    // 字幕字数对不上，不能亮
+
+            // ---------------- ★★★ 2026-10-21【D3 · C2/C3】素材格式（给兜底页讲原因用）
+            //   原来这两类失败是**静默**的：44.1 kHz 的 WAV、32 位 BMP 只会让
+            //   `a_fail` 亮一下，屏上只写 "BAD IMAGE"，现场还得猜。
+            //   这里把"到底哪儿不对"这三根信号引出去，兜底页据此改文案。
+            output [15:0] o_img_bpp,        // 最近一次 BMP 头里的位深（0 = 还没读到）
+            output [31:0] o_aud_rate,       // 最近一次 WAV fmt 里的采样率
+            output [15:0] o_aud_bits,       // 位深
+            output        o_aud_info_valid  // 上面两个值有效
         );
 
             //======================================================================
@@ -626,7 +635,8 @@
                 .dbg_px_cnt     (dbg_px_cnt),
                 .dbg_data_off   (),
                 .dbg_first_px   (dbg_first_px),
-                .dbg_first_addr (dbg_first_addr)
+                .dbg_first_addr (dbg_first_addr),
+                .bmp_bpp        (o_img_bpp)      // ★ D3 · C3：位深引出去给兜底页
             );
 
             // ★★ bmp_scale 已删除 —— bmp_analyze 的像素流【直连】bmp2sdram
@@ -716,11 +726,11 @@
                 .done         (wav_an_done),
                 .fail         (wav_an_fail),
 
-                .smp_rate     (),
+                .smp_rate     (o_aud_rate),
                 .smp_ch       (),
-                .smp_bits     (),
+                .smp_bits     (o_aud_bits),
                 .smp_cnt      (smp_cnt),
-                .info_valid   (),
+                .info_valid   (o_aud_info_valid),
 
                 .smp_data     (smp_data),
                 .smp_we       (smp_we),

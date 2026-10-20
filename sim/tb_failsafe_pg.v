@@ -17,6 +17,7 @@ module tb_failsafe_pg;
     reg  [11:0] x_in = 0, y_in = 0;
     reg         fs_on = 0;
     reg  [1:0]  fs_state = 0;
+reg  [1:0]  fs_hint  = 0;   // D3 C2/C3：0 = 正常 FW 行
     reg  [15:0] px_in = 16'h2222;
     wire [15:0] px_out;
 
@@ -28,7 +29,7 @@ module tb_failsafe_pg;
     failsafe_pg #(.SCALE(2)) dut (
         .clk_pix(clk), .rst_pix_n(rst_n),
         .de_in(de_in), .x_in(x_in), .y_in(y_in),
-        .fs_on(fs_on), .fs_state(fs_state),
+        .fs_on(fs_on), .fs_state(fs_state), .fs_hint(fs_hint),
         .px_in(px_in), .px_out(px_out)
     );
 
@@ -103,6 +104,16 @@ module tb_failsafe_pg;
             $display("  固件行 FW 3.0  2026-10-20:");
             dump_line(12'd264, 12'd276, 17, 1);
         end
+
+        // ---------- ②b D3 · C2/C3：失败原因行 ----------
+        fs_on = 1; fs_state = 2'd2;
+        fs_hint = 2'b01;                       // 图像格式坏
+        $display("\n---- fs_hint=01（图像格式）----");
+        dump_line(12'd264, 12'd276, 17, 1);
+        fs_hint = 2'b10;                       // 音频格式坏
+        $display("\n---- fs_hint=10（音频格式）----");
+        dump_line(12'd264, 12'd276, 17, 1);
+        fs_hint = 2'b00;
 
         // ---------- ③ 文字区外必须是底色 ----------
         fs_state = 1'b0; fs_on = 1'b1;

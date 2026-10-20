@@ -412,6 +412,11 @@ module top_m2 #(
     reg         sub_done_lat;         // sticky：a_sub_done 回来过
     wire        a_dbg_sub_overrun;    // ← top_a/sub2sdram：丢字
     wire        a_dbg_sub_short;      // ← top_a/sub2sdram：字数对不上
+    // ★★★ 2026-10-21【D3 · C2/C3】素材格式信号（由 top_a 透传上来）
+    wire [15:0] a_img_bpp;            // 最近一次 BMP 头的位深（24 = 正常）
+    wire [31:0] a_aud_rate;           // 最近一次 WAV 的采样率（48000 = 正常）
+    wire [15:0] a_aud_bits;           // 位深（16 = 正常）
+    wire        a_aud_iv;             // 上面两个值有效
     wire [31:0] a_dbg_sub_wr_cnt;     // ← top_a/sub2sdram：写了多少字（期望 1600）
     // ★ sub_loaded 是 50 MHz 域的电平，要送进像素域用 ⇒ 两位同步器（和预装那条一个做法）
     reg         sub_on_s1, sub_on_s2;
@@ -675,6 +680,59 @@ module top_m2 #(
 
     // 全设计的复位：引脚复位 + PLL 稳定确认（已锁存）+ 软复位
     wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
+
+    // ============================================================
+    //  ★★★ 2026-10-21【D3 · C1】SD 卡"拔掉再插回"自动恢复
+    // ------------------------------------------------------------
+    //  故障：卡没插（或接触不良）时 `sd_init` 过不去 ⇒ `a_sd_ready=0` ⇒ 兜底页停在
+    //        NO_CARD。把卡插回去**什么也不会发生**，必须人按 KEY4 —— 商显挂在墙上，
+    //        没人去按。这是"第一高发故障"。
+    //  做法：只在 **A 轨空闲**（`~a_busy`）且 **卡没就绪**（`~a_sd_ready`）时，每
+    //        `SD_RETRY_MS` 给 A 轨一个局部复位脉冲，让 `sd_init` 重跑一遍。
+    //  三条边界（都是从"会出事"的那一侧反推出来的）：
+    //    ① **只复位 A 轨**（`a_rst_n`），显示链/HDMI/PLL 一律不动 ⇒ 屏幕不闪、
+    //       显示器不重新同步，SDRAM 里的旧画面继续显示（现场观感 = 后台在重试）；
+    //    ② **只在 `a_busy=0` 时动手**：装载中途把写突发切断，可能让 sdr 仲裁器
+    //       停在半路（这是 10-08 那次"白线 + 沙沙声"的同类风险），所以从根上避开；
+    //    ③ **卡一就绪就停**：`a_sd_ready=1` ⇒ 计数器清零、不再复位。
+    //  ★ 和 KEY4 的关系：KEY4 走 `soft_rst`（全设计复位），这条只动 A 轨，两者不冲突。
+    // ============================================================
+    localparam integer SD_RETRY_MS    = 500;
+    localparam [24:0]  SD_RETRY_TICKS = SD_RETRY_MS * 50_000;   // 50 MHz ⇒ 25,000,000
+
+    reg  [24:0] sd_retry_cnt;
+    reg         a_recover;       // 1 = 正在给 A 轨复位
+    reg  [3:0]  a_recover_dly;   // 复位脉宽（8 拍 ≫ 同步器需要的 2 拍）
+
+    wire sd_need_retry = ~a_sd_ready & ~a_busy & pll_ok_reg & rst_n;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            sd_retry_cnt  <= 25'd0;
+            a_recover     <= 1'b0;
+            a_recover_dly <= 4'd0;
+        end
+        else if (sd_need_retry) begin
+            a_recover_dly <= 4'd0;
+            if (sd_retry_cnt >= SD_RETRY_TICKS) begin
+                sd_retry_cnt  <= 25'd0;
+                a_recover     <= 1'b1;
+                a_recover_dly <= 4'd8;
+            end
+            else sd_retry_cnt <= sd_retry_cnt + 25'd1;
+        end
+        else begin
+            sd_retry_cnt <= 25'd0;
+            if (a_recover_dly != 4'd0) begin
+                a_recover_dly <= a_recover_dly - 4'd1;
+                a_recover     <= 1'b1;
+            end
+            else a_recover <= 1'b0;
+        end
+    end
+
+    // A 轨专用复位：全设计复位 + 本模块的自动重试脉冲
+    wire a_rst_n = sys_rst_n & ~a_recover;
 
     // ============================================================
     //  ★★★ 2026-10-14 深夜【开关3 切音频】—— SW3（拨码/乒乓开关）消抖，双边沿
@@ -1357,7 +1415,10 @@ module top_m2 #(
     //   top_a 用它同时夹【装载长度 sdr_len】和【放行的采样数】⇒ 超出 5.0 s 的字一个都不写，
     //   绝不越界写进后面的小槽区 / 字幕区。契约常量仍然只在上面 SFX_STRIDE 一处定义。
     top_a #(.SLOT_NUM(2), .AUDIO_MAX_WORDS(SFX_STRIDE), .BMP_NAME_EN(BMP_NAME_EN)) u_a (
-        .sys_clk(clk), .sys_rst_n(sys_rst_n),
+        // ★★★ 2026-10-21【D3 · C1】这里从 `sys_rst_n` 改成 `a_rst_n`：
+        //   多串了一个"卡没插时每 500 ms 自动重试"的局部复位脉冲（见上面 C1 那段）。
+        //   `a_rst_n = sys_rst_n & ~a_recover`，正常运行时与 `sys_rst_n` 完全一样。
+        .sys_clk(clk), .sys_rst_n(a_rst_n),
         // ★★★ 2026-10-17【SD 读时钟：25 MHz 试过、**不可靠**，现在退回 12.5 MHz】
         //   走法：`.clk_spi(clk_par)`（100 MHz）⇒ SCLK = 25 MHz。上板遥测：`load_done` 掉、
         //   `a_dbg_px_cnt` 以 3.9 Mpx/s 疯跑（= 11.8 MB/s > 25 MHz 的物理上限 3.1 MB/s）
@@ -1403,7 +1464,10 @@ module top_m2 #(
         // ★★ 2026-10-09 字幕链的诊断（上板看不到字，靠这三个数定位）
         .dbg_sub_wr_cnt(a_dbg_sub_wr_cnt),
         .dbg_sub_overrun(a_dbg_sub_overrun),
-        .dbg_sub_short(a_dbg_sub_short)
+        .dbg_sub_short(a_dbg_sub_short),
+        // ★★★ 2026-10-21【D3 · C2/C3】素材格式（兜底页用它讲清楚"到底哪儿不对"）
+        .o_img_bpp(a_img_bpp), .o_aud_rate(a_aud_rate),
+        .o_aud_bits(a_aud_bits), .o_aud_info_valid(a_aud_iv)
     );
 
 
@@ -2039,6 +2103,7 @@ module top_m2 #(
     // ★★★ 2026-10-21【D2 · B2】兜底页状态（产生逻辑在本文件后面 load_done_latch 之后）
     wire        fs_on_w;
     wire [1:0]  fs_state_w;
+    wire [1:0]  fs_hint_w;      // ★ D3 · C2/C3：{音频格式坏, 图像格式坏}
 
     disp_top u_disp (
         .clk_pix(clk_pix), .clk_par(clk_par), .clk_ser(clk_ser),
@@ -2082,6 +2147,7 @@ module top_m2 #(
         .menu_viz_on(viz_s2),
         // ★★★ 2026-10-21【D2 · B1/B2 兜底页】：没卡 / 坏图 / 装载中 ⇒ 深底自检页（代替米白空屏）
         .fs_on(fs_on_w), .fs_state(fs_state_w),
+        .fs_hint(fs_hint_w),
         // ★★★ 2026-10-17【音频可视化】音频域那几根（viz 只读旁听）
         .clk_aud(clk_aud), .rst_aud_n(aud_rst_n),
         .aud_viz_vld(aud_dbg_vld), .aud_viz_dout(aud_dbg_dout), .aud_viz_next(aud_dbg_next),
@@ -2208,10 +2274,20 @@ module top_m2 #(
             load_done_latch <= 1'b0;
             fail_latch      <= 1'b0;
         end
+        // ★★★ 2026-10-21【D3 · C1】自动重试开始时把两个锁存清掉：
+        //   否则"卡没插时的旧账"会一直挂着 —— 重插成功后红灯还亮、兜底页还判 BAD_IMG，
+        //   现场看到的就是"插了卡还是报错"。
+        else if (a_recover) begin
+            load_done_latch <= 1'b0;
+            fail_latch      <= 1'b0;
+        end
         else begin
             // ★ 这两个都是【单拍脉冲】，必须锁存 ——
             //   串口每 0.5 秒才看一次，不锁存就会漏掉（这会直接骗人）
             if (a_load_done) load_done_latch <= 1'b1;
+            // ★ 装载成功一次就把 fail 清掉：一次成功说明链路是通的，
+            //   之前那笔账（多半是卡没插）不该继续亮灯。
+            if (a_load_done) fail_latch      <= 1'b0;
             if (a_fail)      fail_latch      <= 1'b1;
         end
     end
@@ -2234,6 +2310,24 @@ module top_m2 #(
     wire        fs_bad_w    = fail_latch & ~load_done_latch;
     wire        fs_ld_w     = ~load_done_latch;
 
+    // ============================================================
+    //  ★★★ 2026-10-21【D3 · C2/C3】失败原因：{音频格式, 图像格式}
+    // ------------------------------------------------------------
+    //  背景：44.1 kHz 的 WAV、32 位 BMP **不会报错**，只会被静默丢掉 ——
+    //        现场看到的是"图好好的、就是没声音"，或者"BAD IMAGE"但不知为何。
+    //  判据（都能从 top_a 透传上来的头字段直接读）：
+    //    · 图像：bmp_bpp 读到了，却不是 24 ⇒ 32 位/8 位/16 位 BMP
+    //    · 音频：fmt 头有效，却是 44.1 kHz 或非 16 位
+    //  ★ 这两个量是"最近一次解析结果"，好素材解析成功后自然回到 24/48000，
+    //    所以不需要锁存清除逻辑；只有兜底页会用它（那时反正已经失败了）。
+    // ============================================================
+    wire fmt_img_bad_w = (a_img_bpp != 16'd0) && (a_img_bpp != 16'd24);
+    wire fmt_aud_bad_w = a_aud_iv &&
+                         ((a_aud_rate != 32'd48000) || (a_aud_bits != 16'd16));
+
+    reg         fs_fi_s1, fs_fi_s2;     // 图像格式坏（像素域两级同步）
+    reg         fs_fa_s1, fs_fa_s2;     // 音频格式坏
+
     reg         fs_nc_s1, fs_nc_s2;
     reg         fs_bd_s1, fs_bd_s2;
     reg         fs_ld_s1, fs_ld_s2;
@@ -2245,6 +2339,8 @@ module top_m2 #(
             fs_nc_s1 <= 1'b0; fs_nc_s2 <= 1'b0;
             fs_bd_s1 <= 1'b0; fs_bd_s2 <= 1'b0;
             fs_ld_s1 <= 1'b1; fs_ld_s2 <= 1'b1;
+            fs_fi_s1 <= 1'b0; fs_fi_s2 <= 1'b0;
+            fs_fa_s1 <= 1'b0; fs_fa_s2 <= 1'b0;
             fs_boot_cnt  <= 25'd0;
             fs_boot_done <= 1'b0;
         end
@@ -2252,6 +2348,8 @@ module top_m2 #(
             fs_nc_s1 <= fs_nocard_w;  fs_nc_s2 <= fs_nc_s1;
             fs_bd_s1 <= fs_bad_w;     fs_bd_s2 <= fs_bd_s1;
             fs_ld_s1 <= fs_ld_w;      fs_ld_s2 <= fs_ld_s1;
+            fs_fi_s1 <= fmt_img_bad_w; fs_fi_s2 <= fs_fi_s1;
+            fs_fa_s1 <= fmt_aud_bad_w; fs_fa_s2 <= fs_fa_s1;
             if (!fs_boot_done) begin
                 if (fs_boot_cnt == 25'd20_000_000) begin
                     fs_boot_done <= 1'b1;
@@ -2270,6 +2368,8 @@ module top_m2 #(
                         fs_ld_s2        ? 2'd1 : 2'd0;
     // 只要还在"没出图"的任意一个状态就出兜底页；OK 时整页消失
     assign fs_on_w    = (fs_state_w != 2'd0);
+    // ★ D3 · C2/C3：只在"确实是格式问题"时才改文案（bit0 图像 / bit1 音频）
+    assign fs_hint_w  = {fs_fa_s2, fs_fi_s2};
 
     // ============================================================
     //  ★★★ 2026-10-05：音频上板首试 —— 自产的"装音效 + 播放"命令
