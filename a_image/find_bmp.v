@@ -31,7 +31,11 @@
 //  ① find_bmp —— 薄壳：sd_top 直通读让位 + 共享引擎的请求/结果口
 //==========================================================================
   module find_bmp #(
-      parameter [23:0] TARGET_EXT = {"B","M","P"}   // ★ 只用来给引擎挑扩展名
+      parameter [23:0] TARGET_EXT = {"B","M","P"},  // ★ 只用来给引擎挑扩展名
+      // ★★★ 2026-10-20【找图逻辑·按名字分类（A 轨 10-20 交付，移植到共享引擎）】：
+      //   NAME_EN = 0 ⇒ 只比后缀（老行为，逐位不变；名字比较整段被综合删掉）
+      //   NAME_EN = 1 ⇒ 后缀 + 文件名前缀都要对（第 0~7 字节）
+      parameter        NAME_EN    = 1'b0
   )(
       input             sys_clk,
       input             sys_rst_n,
@@ -56,6 +60,7 @@
       input             start,
       input             cmd,
       input      [3:0]  skip,
+      input             name_sel,       // ★ 0 = 找 NAME0（"AD"），1 = 找 NAME1（"MAP"）
       input      [31:0] in_cluster,
       // ---- 状态回报 ----
       output reg        busy,
@@ -86,6 +91,8 @@
       //======================================================================
       output [23:0]     eng_ext,        // → 引擎：本链要找的扩展名（常数量，无逻辑）
       output [3:0]      eng_skip,       // → 引擎：本链的 skip（引擎在 start 那拍锁存）
+      output            eng_name_en,    // ★ → 引擎：本链要不要比文件名（= NAME_EN，常数）
+      output            eng_name_sel,   // ★ → 引擎：0 = AD 类，1 = MAP 类（NAME_EN=0 时为 0）
       output            eng_start,      // → 引擎：本链要查文件（= 原 f_start 的语义）
       output            eng_owner,      // → 引擎：1 = 本链当家（= fe_owner）
       input      [31:0] eng_lba_i,      // ← 引擎：引擎自己算的扇区地址
@@ -102,6 +109,9 @@
       //======================================================================
       assign eng_ext   = TARGET_EXT;    // 参数是常量 ⇒ 综合成 tie-off，不占 LUT
       assign eng_skip  = skip;
+      // ★ NAME_EN=0 ⇒ 恒 0，引擎里名字比较整段被综合掉（音频/字幕两条链 0 LUT）
+      assign eng_name_en  = NAME_EN ? 1'b1 : 1'b0;
+      assign eng_name_sel = NAME_EN ? name_sel : 1'b0;
       assign eng_start = start;
       assign eng_owner = fe_owner;
 
@@ -199,7 +209,12 @@
 //      （eng_lba/eng_req）交回薄壳，由薄壳与直通读地址仲裁后再上送。
 //  另外把 `rd_*` 直通搬回薄壳，所以引擎这里只保留"引擎自己忙"这一根 `eng_busy`。
 //==========================================================================
-  module find_bmp_eng (
+  module find_bmp_eng #(
+      // ★★★ 2026-10-20【按名字分类】：0x00 字节 = 通配（前缀匹配），所以 "AD" 匹配
+      //   AD.BMP / AD2.BMP / ADIMG.BMP；小写参数自动转大写在下面 nm_u 里做。
+      parameter [63:0] NAME0 = 64'h4144_0000_0000_0000,   // "A","D"
+      parameter [63:0] NAME1 = 64'h4D41_5000_0000_0000    // "M","A","P"
+  )(
       input             sys_clk,
       input             sys_rst_n,
       // ---- 共享前端应答（广播）----
@@ -213,6 +228,8 @@
       input             start,          // 单拍：开始查（top_a 已按 sd_mode 选中）
       input             owner,          // ★ 1 = 发起者就是当家链（top_a 用 sd_mode_r 算）
       input      [23:0] target_ext,     // ★ 要找的扩展名（合并后由请求方带）
+      input             name_en,        // ★ 1 = 还要比文件名（只有图像链会拉高）
+      input             name_sel,       // ★ 0 = NAME0（"AD"），1 = NAME1（"MAP"）
       input             cmd,
       input      [3:0]  skip,
       input      [31:0] in_cluster,
@@ -258,6 +275,9 @@
       reg [3:0]  skip_r;
       reg [31:0] in_clus_r;
       reg [23:0] ext_r;          // ★ 切法C：start 那拍锁存请求方的扩展名
+      reg        name_en_r;      // ★ 2026-10-20：start 那拍锁存"要不要比名字"
+      reg        name_sel_r;     // ★ 2026-10-20：start 那拍锁存"AD 类 / MAP 类"
+      reg        name_ok;        // ★ 2026-10-20：目录项第 0~7 字节的名字前缀比较结果
 
       reg [9:0]  byte_cnt;       // 扇区内字节计数 0~511
       reg [7:0]  dir_sec;        // 根目录已扫到第几个扇区
@@ -325,6 +345,18 @@
       wire ext_ok = (ext0 == ext_r[23:16]) &&
                     (ext1 == ext_r[15:8])  &&
                     (ext2 == ext_r[7:0]);
+
+      //==========================================================================
+      //  ★★★ 2026-10-20【找图逻辑·按名字分类】：目录项第 0~7 字节（8.3 的主名）
+      //    · NAME0/NAME1 里没写满的字节是 0x00 = 通配 ⇒ "AD" 能匹配 AD.BMP / AD2.BMP
+      //    · 卡上永远大写；参数写小写在这里自动转（只影响第 5~7 位，几颗 LUT）
+      //    · name_en_r=0（音频/字幕链）⇒ name_ok 不参与判断，整段被综合删掉
+      //==========================================================================
+      wire [7:0] nb0  = NAME0[63 - byte_cnt[2:0]*8 -: 8];
+      wire [7:0] nb1  = NAME1[63 - byte_cnt[2:0]*8 -: 8];
+      wire [7:0] nm_b = name_sel_r ? nb1 : nb0;
+      wire [7:0] nm_u = (nm_b >= 8'h61 && nm_b <= 8'h7A) ? (nm_b - 8'd32) : nm_b;
+      wire       nm_eq = (nm_b == 8'h00) ? 1'b1 : (sd_data == nm_u);
 
       // FAT 表项在本扇区里的字节偏移：每扇区 128 项、每项 4 字节
       wire [9:0]  fat_off = {in_clus_r[6:0], 2'b00};   // 0,4,...,508
@@ -431,6 +463,8 @@
                       skip_r    <= skip;
                       in_clus_r <= in_cluster;
                       ext_r     <= target_ext;   // ★ 切法C：本拍锁存请求方的扩展名
+                      name_en_r <= name_en;      // ★ 2026-10-20：锁存"本链要不要比名字"
+                      name_sel_r<= name_sel;     // ★ 2026-10-20：锁存"AD 类 / MAP 类"
                       owner_r   <= owner;        // ★ 切法C：本拍锁存"发起者当家"
                       hit_cnt   <= 4'd0;
                       dir_sec   <= 8'd0; 
@@ -513,12 +547,18 @@
                           if (byte_cnt[4:0] == 5'd0)
                               entry_live <= (sd_data != 8'h00) &&
                                             (sd_data != 8'hE5);
+
+                          // ★ 2026-10-20：名字前缀（第 0~7 字节）累加比较
+                          if (byte_cnt[4:0] == 5'd0)      name_ok <= nm_eq;
+                          else if (byte_cnt[4:0] <= 5'd7) name_ok <= name_ok && nm_eq;
+
                           if (byte_cnt[4:0] == 5'd8)  ext0 <= sd_data;
                           if (byte_cnt[4:0] == 5'd9)  ext1 <= sd_data;
                           if (byte_cnt[4:0] == 5'd10) ext2 <= sd_data;
 
                           if (byte_cnt[4:0] == 5'd11)          // 属性字节
                               entry_hit <= entry_live && ext_ok &&
+                                           (!name_en_r || name_ok) &&
                                            ((sd_data & 8'h18) == 8'h00);
                               // 0x18 一次排除 LFN(0x0F)/卷标(0x08)/目录(0x10)
 

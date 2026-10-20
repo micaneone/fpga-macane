@@ -55,6 +55,11 @@
       //   0 = 不用它（沿用 PEAK_SLOW / PEAK_FAST 的老口径），对 viz_top.v 向后兼容。
       parameter integer PEAK_DIV   = 0,
       parameter integer GAP        = 1,
+      // ★★★ 2026-10-20【柱高缩放】：`h_draw = (h_bar >> H_SHIFT) | 1`。
+      //   用途：`BAR_H` 里 `dy >= BAR_H - h_draw` 是 6 位比较，BAR_H 小于 64 会下溢，
+      //   所以"音谱占屏高"只能靠缩波形，不能靠把 BAR_H 改小。
+      //   H_SHIFT=0 = 原样；1 = 满格 31 px；2 = 15 px。纯移位，**零逻辑**。
+      parameter integer H_SHIFT    = 0,
       parameter [7:0]   COL_B      = 8'd24
   )(
       // ---- ★ 写/维护在音频域 ----
@@ -111,7 +116,7 @@
       reg  [9:0]  dx, dy;
       reg         in_rect;
       reg  [4:0]  ci;
-      reg  [5:0]  h_bar, h_peak, h_draw;
+      reg  [5:0]  h_bar, h_peak, h_draw, h_pk_s;
       reg         gap_hit;
       reg         is_bar, is_peak;
       reg  [5:0]  c_lvl;
@@ -174,13 +179,20 @@
           h_bar  = bar [ci];
           h_peak = peak[ci];
 
-          h_draw = (h_bar == 6'd0) ? 6'd1 : h_bar;      // ★ 地平线
+          h_draw = (h_bar == 6'd0) ? 6'd1 : ((h_bar >> H_SHIFT) | 6'd1);   // ★ 地平线 + 柱高缩放
+          h_pk_s = (h_peak == 6'd0) ? 6'd0 : ((h_peak >> H_SHIFT) | 6'd1); // ★ 浮标同比例
+
+          // ★ 2026-10-20【带高可以小于 64 了】：`dy >= BAR_H - h_draw` 是 10 位减法，
+          //   h_draw > BAR_H 会下溢成一个大数（柱子直接铺满整带，看着像"卡满"）。
+          //   这里把 h_draw 钳到 BAR_H-1，满格就正好顶到带顶，不再靠下溢兜。
+          if (h_draw > (BAR_H[5:0] - 6'd1)) h_draw = BAR_H[5:0] - 6'd1;
+          if (h_pk_s > (BAR_H[5:0] - 6'd1)) h_pk_s = BAR_H[5:0] - 6'd1;
 
           is_bar = in_rect && !gap_hit &&
                    (dy >= (BAR_H - {4'd0, h_draw}));    // ★改1：BAR_H 直接是 10 位
 
-          is_peak = in_rect && !gap_hit && (h_peak != 6'd0) &&
-                    (dy == (BAR_H - {4'd0, h_peak} - 10'd1));   // ★改1
+          is_peak = in_rect && !gap_hit && (h_pk_s != 6'd0) &&
+                    (dy == (BAR_H - {4'd0, h_pk_s} - 10'd1));   // ★改1
 
           c_lvl = is_bar ? h_bar : 6'd0;
           c_out = { c_lvl[5] ? 8'hFF : {c_lvl[4:0], 3'b000},

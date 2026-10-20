@@ -1,4 +1,7 @@
-  module bmp_analyze(
+  module bmp_analyze #(
+      // ★ 2026-10-20：1 = 按文件名找（AD* / MAP*），0 = 只按后缀（老行为）
+      parameter NAME_EN = 1'b0
+  )(
       input         sys_clk,
       input         sys_rst_n,
 
@@ -20,6 +23,8 @@
       //   谁选主 / 怎么保证同时只有一条链在查 —— 见 top_a 的 sd_mode_r 那一段。
       output [23:0] eng_ext,        // → 引擎：本链扩展名（常量 "BMP"）
       output [3:0]  eng_skip,       // → 引擎：本链 skip（引擎在 start 那拍锁存）
+      output        eng_name_en,    // ★ 2026-10-20：本链要比文件名 ⇒ 恒 1
+      output        eng_name_sel,   // ★ 2026-10-20：0 = AD 类，1 = MAP 类
       output        eng_start,      // → 引擎：本链要查文件
       output        eng_owner,      // → 引擎：1 = 装图这条当家 → 直接接 u_find_eng.owner
       input  [31:0] eng_lba_i,      // ← 引擎：引擎自己算的扇区地址
@@ -34,6 +39,7 @@
       // ---- 命令 ----
       input         start,          // 拉高一拍开始
       input  [3:0]  skip,           // 第几张 BMP
+      input         name_sel,       // ★ 2026-10-20：0 = 找 AD 类，1 = 找 MAP 类
 
       // ---- 状态 ----
       output reg    busy,
@@ -542,7 +548,10 @@
           end
       end
 
-      find_bmp u_find_bmp (
+      find_bmp #(
+          .TARGET_EXT ({"B","M","P"}),
+          .NAME_EN    (NAME_EN)           // ★ 2026-10-20：由顶层开关（默认 0 = 老行为）
+      ) u_find_bmp (
           .sys_clk    (sys_clk),
           .sys_rst_n  (sys_rst_n),
 
@@ -561,6 +570,7 @@
           .start      (f_start),
           .cmd        (1'b0),           // 0 = 找文件
           .skip       (skip),
+          .name_sel   (name_sel),       // ★ 2026-10-20：0 = AD 类，1 = MAP 类
           .in_cluster (32'd0),          // cmd=0 用不到
 
           .busy       (),               // 不用
@@ -587,6 +597,8 @@
           // ---- ★★★ 2026-10-16【切法C·find_bmp 合流】----
           .eng_ext     (eng_ext),
           .eng_skip    (eng_skip),
+          .eng_name_en (eng_name_en),   // ★ 2026-10-20：恒 1（本链要比名字）
+          .eng_name_sel(eng_name_sel),  // ★ 2026-10-20：0 = AD 类，1 = MAP 类
           .eng_start   (eng_start),
           .eng_owner   (eng_owner),
           .eng_lba_i   (eng_lba_i),

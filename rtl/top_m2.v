@@ -980,6 +980,12 @@ module top_m2 #(
     //   "场景级致命"）。改成 1 之后：上电 → 装完首图 + 字幕 + 音频 → 3 s 后自动换下一张。
     //   ★ 现场仍可用 KEY3 手动暂停（电平语义没变），`caro_idle` 那两道闸门也没动。
     localparam CARO_ON_AT_BOOT = 1'b1;
+    // ★★★ 2026-10-20【找图逻辑·按名字分类 开关】
+    //   0 = 只按后缀 .BMP 找（老行为，卡里现有素材不动就能跑）
+    //   1 = 只找 `AD*.BMP`（广告位）；`bmp_name_sel=1` 时只找 `MAP*.BMP`（插播图）
+    //   ★ 上板实测（10-20 19:50）：设成 1 但卡里没有 AD 开头的图 ⇒ `S` 的 FAIL 位置 1、
+    //     Apx=0、屏上没图。所以**必须先把素材改名**（AD1.BMP…）再把它改成 1。
+    localparam BMP_NAME_EN = 1'b0;
     reg         auto_caro;                                   // 轮播开关
     wire        caro_tick = (caro_cnt >= (CARO_TICKS - 28'd1));
     // ★★★ 空闲闸门（两道）：
@@ -1350,7 +1356,7 @@ module top_m2 #(
     // ★★★ 2026-10-15【音频溢出保护】：把"音效区容量"传进 top_a ——
     //   top_a 用它同时夹【装载长度 sdr_len】和【放行的采样数】⇒ 超出 5.0 s 的字一个都不写，
     //   绝不越界写进后面的小槽区 / 字幕区。契约常量仍然只在上面 SFX_STRIDE 一处定义。
-    top_a #(.SLOT_NUM(2), .AUDIO_MAX_WORDS(SFX_STRIDE)) u_a (
+    top_a #(.SLOT_NUM(2), .AUDIO_MAX_WORDS(SFX_STRIDE), .BMP_NAME_EN(BMP_NAME_EN)) u_a (
         .sys_clk(clk), .sys_rst_n(sys_rst_n),
         // ★★★ 2026-10-17【SD 读时钟：25 MHz 试过、**不可靠**，现在退回 12.5 MHz】
         //   走法：`.clk_spi(clk_par)`（100 MHz）⇒ SCLK = 25 MHz。上板遥测：`load_done` 掉、
@@ -1372,6 +1378,9 @@ module top_m2 #(
         .start(a_start_use | aud_load_pulse | sub_load_pulse),
         .sd_mode(a_sd_mode),
         .skip(a_sd_mode == 2'd2 ? SUB_SKIP : (a_sd_mode == 2'd1 ? {{4-SEL_AUD_W{1'b0}}, sel_aud} : a_skip)),
+        // ★★★ 2026-10-20【找图逻辑·按名字分类】：0 = 只找 `AD*.BMP`（广告位），
+        //   1 = 只找 `MAP*.BMP`（插播画面）。S1 插播态做出来后这里接 `alert_on`。
+        .bmp_name_sel(1'b0),
         .use_slot(a_use_slot),
         .slot_base(a_slot_base), .img_no(a_img_no),
         .sfx_base(a_sd_mode == 2'd1 ? SFX_BASE : 21'd0),

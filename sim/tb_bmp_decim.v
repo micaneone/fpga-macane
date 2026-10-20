@@ -114,6 +114,8 @@ module tb_bmp_decim;
         .fe_err       (fe_err),
         .eng_ext      (eng_ext),
         .eng_skip     (eng_skip),
+        .eng_name_en  (),             // ★ 2026-10-20：名字匹配在引擎里，本台子假引擎，不接
+        .eng_name_sel (),             // ★ 2026-10-20：同上
         .eng_start    (eng_start),
         .eng_owner    (eng_owner),
         .eng_lba_i    (eng_lba_i),
@@ -126,6 +128,7 @@ module tb_bmp_decim;
         .eng_cluster  (eng_cluster),
         .start        (start),
         .skip         (skip),
+        .name_sel     (1'b0),         // ★ 2026-10-20：本台子只验 BMP 解析，走 AD 类
         .busy         (busy),
         .done         (done),
         .fail         (fail),

@@ -80,7 +80,11 @@
             // ★★★ 2026-10-15【音频溢出保护】音效区容量（字）= 契约 v9 的 120000 字（5.0 s @48 kHz，单声道 16bit）。
             //   ★ 由 top_m2 例化时用 SFX_STRIDE 传进来 ⇒ 契约常量仍然【只在顶层一处定义】。
             //   ★ 默认值只是"没人传参时也不会越界"，正式值以顶层传入的为准。
-            parameter integer AUDIO_MAX_WORDS = 120000
+            parameter integer AUDIO_MAX_WORDS = 120000,
+            // ★★★ 2026-10-20【找图逻辑·开关】1 = 图像链按文件名找（AD* / MAP*），
+            //   0 = 只按后缀找（= 老行为）。★ 默认 0：卡里现有素材没改名，开了就找不到图。
+            //   素材统一改名成 `AD*.BMP`（广告位）/ `MAP*.BMP`（插播图）之后，把它改成 1。
+            parameter integer BMP_NAME_EN = 1'b0
         )(
             // ---------------- 时钟复位 ----------------
             input         sys_clk,          // 50 MHz
@@ -102,6 +106,11 @@
             input         start,            // 单拍：开始装一张图 / 一条音频 / 一条字幕
             input  [1:0]  sd_mode,          // ★★ 0 = 装图   1 = 装音频   2 = 装字幕
             input  [3:0]  skip,             // 第几个（三条链各在【自己的扩展名】里数）
+            // ★★★ 2026-10-20【找图逻辑·按名字分类】：0 = 找 AD 类，1 = 找 MAP 类。
+            //   ★ 必须接，不能悬空（悬空 ⇒ 名字比较出 x ⇒ 永远找不到图 ⇒ 装图一直 FAIL）。
+            //   ★ 三条链的 `skip` 仍然只用一根 —— 顶层本来就按 sd_mode 先三选一，
+            //     拆成三根在这里是纯冗余（交付说明里那三根是给"旧底座"写的）。
+            input         bmp_name_sel,
 
             // ---- 图像专用 ----
             input  [2:0]  use_slot,         // ★ 3 位：装到第几个槽（0 ~ SLOT_NUM-1）
@@ -248,6 +257,10 @@
             wire        eng_req_o;         // 引擎读请求
             wire [23:0] eng_ext_sel;
             wire [3:0]  eng_skip_sel;
+            wire        eng_name_en_sel;   // ★ 2026-10-20：本笔传输要不要比文件名
+            wire        eng_name_sel_sel;  // ★ 2026-10-20：0 = AD 类，1 = MAP 类
+            wire        eng_name_en_bmp;   // ★ 2026-10-20：图像链恒 1
+            wire        eng_name_sel_bmp;  // ★ 2026-10-20：= bmp_name_sel
             wire        eng_start;
             wire        eng_owner_sel;
             wire        eng_busy_o;        // ← 引擎自己的 busy（回送给三条链做让位仲裁）
@@ -358,6 +371,11 @@
                                   mode_is_wav ? eng_ext_wav  : eng_ext_bmp;
             assign eng_skip_sel = mode_is_sub ? eng_skip_sub :
                                   mode_is_wav ? eng_skip_wav : eng_skip_bmp;
+            // ★★★ 2026-10-20【找图逻辑·按名字分类】：只有图像链要比文件名，
+            //   所以这里按 mode 门控 —— 音频/字幕那两笔传输必须送 0，否则它们也会拿
+            //   "AD" 去比名字 ⇒ 一条 WAV 都找不到。
+            assign eng_name_en_sel  = (mode_is_sub || mode_is_wav) ? 1'b0 : eng_name_en_bmp;
+            assign eng_name_sel_sel = (mode_is_sub || mode_is_wav) ? 1'b0 : bmp_name_sel;
 
             // ---- 引擎自己的地址/请求 ----
             // ★★★ 2026-10-16【清理冗余 viz + 修 top_a 多重驱动】
@@ -426,6 +444,8 @@
                 .start           (eng_start),
                 .owner           (eng_owner_sel),
                 .target_ext      (eng_ext_sel),
+                .name_en         (eng_name_en_sel),   // ★ 2026-10-20：只有装图那笔要比名字
+                .name_sel        (eng_name_sel_sel),  // ★ 2026-10-20：0 = AD 类，1 = MAP 类
                 .cmd             (1'b0),          // ★ 三条链都只找文件
                 .skip            (eng_skip_sel),
                 .in_cluster      (32'd0),         // cmd=0 用不到
@@ -555,7 +575,9 @@
             //======================================================================
             //  图像链
             //======================================================================
-            bmp_analyze u_bmp_analyze (
+            bmp_analyze #(
+                .NAME_EN (BMP_NAME_EN)        // ★ 2026-10-20：0 = 只按后缀找（老行为）
+            ) u_bmp_analyze (
                 .sys_clk    (sys_clk),
                 .sys_rst_n  (sys_rst_n),
 
@@ -573,6 +595,8 @@
                 // ★★★ 2026-10-16【切法C·find_bmp 合流】：查文件走唯一引擎 u_find_eng
                 .eng_ext      (eng_ext_bmp),
                 .eng_skip     (eng_skip_bmp),
+                .eng_name_en  (eng_name_en_bmp),   // ★ 2026-10-20：恒 1
+                .eng_name_sel (eng_name_sel_bmp),  // ★ 2026-10-20：= bmp_name_sel
                 .eng_start    (eng_start_bmp),
                 .eng_owner    (),
                 .eng_lba_i    (eng_lba_o),
@@ -585,6 +609,7 @@
                 .eng_cluster  (eng_clu_r),
                 .start      (bmp_start),         // ★ 只在装图那一拍给
                 .skip       (skip),
+                .name_sel   (bmp_name_sel),      // ★ 2026-10-20：0 = AD 类，1 = MAP 类
                 .busy       (bmp_busy),
                 .done       (bmp_done),
                 .fail       (bmp_fail),

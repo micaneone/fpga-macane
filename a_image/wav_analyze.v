@@ -498,7 +498,8 @@
       //  （FAT32 扫描 / 目录项匹配 / 簇链 / 扇区直通读 —— 全部原样复用）
       //======================================================================
       find_bmp #(
-          .TARGET_EXT (TARGET_EXT)
+          .TARGET_EXT (TARGET_EXT),
+          .NAME_EN    (1'b0)            // ★ 2026-10-20：音频链只比后缀（名字比较整段被删）
       ) u_find_bmp (
           .sys_clk    (sys_clk),
           .sys_rst_n  (sys_rst_n),
@@ -518,6 +519,7 @@
           .start      (f_start),
           .cmd        (1'b0),           // 0 = 找文件
           .skip       (skip),
+          .name_sel   (1'b0),           // ★ 2026-10-20：本链不比名字，固定 0
           .in_cluster (32'd0),          // cmd=0 用不到
 
           .busy       (),               // 不用
