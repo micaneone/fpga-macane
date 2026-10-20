@@ -565,7 +565,7 @@ module disp_top #(
     wire [15:0] px_m;
     wire        de_m, vs_m;
 
-    menu_ovl u_menu (
+    menu_ovl_cn u_menu (
         .clk_pix(clk_pix), .rst_pix_n(rst_pix_n),
         .de_in(de_z), .vs_in(vs_z),
         .x_in(mx2), .y_in(my2),

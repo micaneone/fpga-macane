@@ -652,7 +652,7 @@
                     <Attr Name="CompileOrder" Val="84"/>
                 </FileInfo>
             </File>
-            <File Path="../b_display/menu_ovl.v">
+            <File Path="../b_display/menu_ovl_cn.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
                     <Attr Name="UsedInP&R" Val="true"/>
@@ -669,6 +669,14 @@
                 </FileInfo>
             </File>
             <File Path="../b_display/font_rom.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="89"/>
+                </FileInfo>
+            </File>
+  <File Path="../b_display/font_cn.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
                     <Attr Name="UsedInP&R" Val="true"/>
