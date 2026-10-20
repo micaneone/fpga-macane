@@ -30,3 +30,7 @@ wave/
 #   只是同一份代码的副本 ⇒ 不进仓库，免得以后误提交、也免得两份不一致。
 b_display/blk_rd_arb.v
 b_display/vendor_rd_path.v
+sim/work*/
+sim/_work*/
+sim/lint3/
+prj/M2_Runs/
