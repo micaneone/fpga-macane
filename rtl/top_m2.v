@@ -697,7 +697,7 @@ module top_m2 #(
     //  ★ 和 KEY4 的关系：KEY4 走 `soft_rst`（全设计复位），这条只动 A 轨，两者不冲突。
     // ============================================================
     localparam integer SD_RETRY_MS    = 500;
-    localparam [24:0]  SD_RETRY_TICKS = SD_RETRY_MS * 50_000;   // 50 MHz ⇒ 25,000,000
+    localparam [24:0]  SD_RETRY_TICKS = SD_RETRY_MS * 50_003;   // 50 MHz ⇒ 25,000,000
 
     reg  [24:0] sd_retry_cnt;
     reg         a_recover;       // 1 = 正在给 A 轨复位
@@ -705,7 +705,16 @@ module top_m2 #(
 
     // ★ 看门狗的输出：声明放这儿，真正的 always 块在后面（要等 _dbg_* 声明之后）
     reg         a_stall;         // ← 由后面 C1b 看门狗驱动（声明必须在这里，FSM 要用）
-    wire sd_need_retry = ~a_sd_ready & ~a_busy & pll_ok_reg & rst_n;
+    // ★★★ 2026-10-21【D3 · C1e】"卡就绪"的有效版本。
+    //   上板实测：**先插卡上电、再拔卡** ⇒ `bus_owner` 一直是 1、`a_sd_ready` 一直是 1，
+    //   于是"没卡就重试"这套判据永远不触发（用户看到的是"拔了没反应"）；
+    //   插回去时读口对着一个刚上电的卡发 CMD17 ⇒ 读回全 0xFF ⇒ 白图。
+    //   做法：用"连续读失败"当拔卡证据（`sd_lost`），把它与 `a_sd_ready` 相与，
+    //   从而复用**已经验证过**的 500 ms 重试通道（复位 A 轨 ⇒ 重新 sd_init）。
+    //   ★ 为什么用"连续两次失败"而不是一次：一次失败可能只是某个素材坏，
+    //     真拔卡时轮播每 3 s 一次，两次也在 3~6 s 内到齐，够快。
+    wire        sd_ready_eff;
+    wire sd_need_retry = ~sd_ready_eff & ~a_busy & pll_ok_reg & rst_n;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -1361,7 +1370,7 @@ module top_m2 #(
         //     · 菜单**开**着 ⇒ 恒为 1（没按） ⇒ 不换图，KEY2 那条路让给菜单的"缩放调节"。
         //   ★ 手动换图和轮播请求同走 `adv_take = k1_press | adv_req`（`stub_ctrl` 内）。
         .key1(key1 | menu_on), .key2(key2), .adv_req(adv_req_w),
-        .sd_ready(a_sd_ready), .a_busy(a_busy), .hold(stwr_busy),
+        .sd_ready(sd_ready_eff), .a_busy(a_busy), .hold(stwr_busy),
         // ★ 转场握手：屏上全米白了才真的去装；转场期间不受理新请求
         .may_load(ml2), .tr_active(ac2),
         .slot_in(a_slot_use),
@@ -2276,9 +2285,22 @@ module top_m2 #(
             load_done_latch <= 1'b0;
             fail_latch      <= 1'b0;
         end
-        // ★★★ 2026-10-21【D3 · C1】自动重试开始时把两个锁存清掉：
+        // ★★★ 2026-10-21【D3 · C1】自动重试开始时把失败锁存清掉：
         //   否则"卡没插时的旧账"会一直挂着 —— 重插成功后红灯还亮、兜底页还判 BAD_IMG，
         //   现场看到的就是"插了卡还是报错"。
+        //   ★ 2026-10-21 晚订正：**不再清 `load_done_latch`**。
+        //     清了它，兜底页会立刻跳回 LOADING（`fs_state` 的判据是 !load_done_latch），
+        //     屏上从"上一张好图"变成黑底 LOADING 大页，而重试往往几十毫秒就成功 ——
+        //     现场观感是"插卡那一刻屏幕闪一下"。（上板实测 2026-10-20 21:55）
+        //     保留它 = 重试期间继续显示上一张好图，效果和"后台在偷偷重试"一致。
+        //   ★★★ 2026-10-21 23:2x【C1g，按用户 m02795 的建议改回来】
+        //     "NO_CARD 时把画布判为无效，别让后面接着读错"：
+        //     拔卡那一刻 A 轨可能正写到一半（一笔突发只写了几行），SDRAM 里那张图
+        //     是**半新半旧**的；而显示侧只要 `load_done_latch` 还是 1 就照读不误
+        //     ⇒ 屏上出现的正是"白块 / 错行 / 整体偏移"（上板实测 2026-10-20 22:0x）。
+        //     所以恢复期间必须**主动作废画布**：清 `load_done_latch`，
+        //     让 `fs_state` 落回 LOADING、整屏换成兜底页，等新装载完成再恢复出图。
+        //     代价只是插卡后多一段 LOADING 页（本地几十毫秒 ~ 1 秒）。
         else if (a_recover) begin
             load_done_latch <= 1'b0;
             fail_latch      <= 1'b0;
@@ -2295,6 +2317,46 @@ module top_m2 #(
     end
 
     // ============================================================
+    //  ★★★ 2026-10-21【D3 · C1e】拔卡检测（读失败计数 ⇒ sd_lost）
+    // ------------------------------------------------------------
+    //  上板事实（2026-10-20 22:2x 实测，全程不按键）：
+    //    拔卡那一刻正在装图 ⇒ `a_fail` 亮（f2 bit4）、`f22` 停住；
+    //    此后 **22 秒**没有任何动作（屏上还是旧图，用户看到"拔了没反应"）；
+    //    22 s 后才由 C1b 看门狗复位 A 轨、重装、字幕重新载入，自己恢复。
+    //  结论：恢复通道是好的，**判据来得太晚**。这里把它提前到"连续两次读失败"。
+    // ============================================================
+    reg  [1:0]  fail_cnt;        // 连续失败次数（成功一次清零）
+    reg         sd_lost;         // 1 = 认定卡已拔走（把 sd_ready_eff 打掉）
+    // ★ `a_fail` 是**电平**（一直亮到下次 start），不是脉冲 ⇒ 必须取上升沿，
+    //   否则一个坏素材就会把计数器瞬间顶满、把好卡判成"拔走了"。
+    reg         a_fail_d;
+    wire        a_fail_rise = a_fail & ~a_fail_d;
+    always @(posedge clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) a_fail_d <= 1'b0;
+        else            a_fail_d <= a_fail;
+    end
+    always @(posedge clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin
+            fail_cnt <= 2'd0;
+            sd_lost  <= 1'b0;
+        end
+        else if (!a_sd_ready) begin
+            // A 轨刚被复位、还没 init 完 ⇒ 不计失败，等它重新就绪
+            fail_cnt <= 2'd0;
+            sd_lost  <= 1'b0;
+        end
+        else if (a_load_done) begin
+            fail_cnt <= 2'd0;
+            sd_lost  <= 1'b0;           // 成功一次就撤销"拔卡"判定
+        end
+        else if (a_fail_rise) begin
+            if (fail_cnt != 2'd3) fail_cnt <= fail_cnt + 2'd1;
+            if (fail_cnt >= 2'd1) sd_lost  <= 1'b1;   // 连续第 2 次失败 ⇒ 判拔卡
+        end
+    end
+    assign sd_ready_eff = a_sd_ready & ~sd_lost;
+
+    // ============================================================
     //  ★★★ 2026-10-21【D2 · B2】兜底页状态机（NO_CARD > BAD_IMG > LOADING > OK）
     // ------------------------------------------------------------
     //  三个输入都在 50 MHz 控制域，先在 `clk` 域算成 3 根电平，再各自两级同步到
@@ -2308,7 +2370,7 @@ module top_m2 #(
     //  ★ 上电 0.5 s 内一律按 LOADING 显示：否则 SD 还没初始化完就会先闪一下
     //    "NO SD CARD"，现场看着像故障（这是 2026-10-19 评审里点过的坑）。
     // ============================================================
-    wire        fs_nocard_w = ~a_sd_ready;
+    wire        fs_nocard_w = ~sd_ready_eff;
     wire        fs_bad_w    = fail_latch & ~load_done_latch;
     wire        fs_ld_w     = ~load_done_latch;
 

@@ -134,6 +134,9 @@ module transition_ctrl #(
     wire       vs_e = vs & ~vs_r;          // 帧边缘
     reg [15:0] ver_l;                      // 发起转场时的描述符版本
     reg [15:0] hold_cnt;
+    // ★★★ 2026-10-21【D3 · C1f】装载超时（补救版，见文件尾注释）
+    reg [15:0] lod_cnt;
+    localparam [15:0] LOD_TO_FRAMES = 16'd240;   // 4 s @60Hz：1080x720 实测装 2.05 s，必须留余量
 
     // ★ 两套缩放几何之后，"几何跟着谁"这件事由几何自己解决，这一位不再使用。
     //   （保留端口是为了不动顶层/测试台的接线；恒 0。）
@@ -164,6 +167,7 @@ module transition_ctrl #(
             may_load <= 1'b0;
             swap     <= 1'b0;
             active   <= 1'b0;
+            lod_cnt  <= 16'd0;
         end
         else begin
             vs_r <= vs;
@@ -181,6 +185,11 @@ module transition_ctrl #(
                 if (req) begin
                     ver_l    <= ver;       // ★ 记下发起时的版本
                     hold_cnt <= 16'd0;
+                    // ★★★ 2026-10-21【C1f】每次重新发起装载都要把超时计数器清零。
+                    //   上一版（C1d）漏了这一行 ⇒ 第一次超时之后 lod_cnt 一直停在阈值上，
+                    //   此后每一笔 S_LOAD 都会在**第一帧**就判定超时并放弃，
+                    //   屏上表现为**整屏纯白**（上板实测 2026-10-20 22:0x）。
+                    lod_cnt  <= 16'd0;
                     active   <= 1'b1;
                     if (back_ready) begin
                         // ============================================================
@@ -220,6 +229,7 @@ module transition_ctrl #(
                 prog     <= 9'd256;
                 may_load <= 1'b1;
                 if (vs_e && (hold_cnt < HOLD_MIN[15:0])) hold_cnt <= hold_cnt + 16'd1;
+                if (vs_e && (lod_cnt  != 16'hFFFF))     lod_cnt  <= lod_cnt  + 16'd1;
 
                 if ((ver != ver_l) && (hold_cnt >= HOLD_MIN[15:0])) begin
                     st       <= S_FX;
@@ -228,6 +238,19 @@ module transition_ctrl #(
                     white_b  <= 1'b0;
                     prog     <= 9'd0;
                     may_load <= 1'b0;              // 装载结束，A 该停手了
+                end
+                // ★★★ 2026-10-21【C1f】装载超时（2 s 还没有新描述符）⇒ 放弃、回 IDLE。
+                //   为什么必须有：拔卡/坏卡时 A 轨那边 `a_start` 发了却永远装不完，
+                //   屏上一直等 ver 变 ⇒ `may_load` 永远 1、`stub_ctrl.req_pend` 永远 1
+                //   ⇒ `caro_idle` 永久为 0（**22 秒的静默**就是这么来的，上板实测）。
+                //   回 IDLE 会让 `active` 落 0 ⇒ `stub_ctrl` 收到 `tr_done`
+                //   ⇒ 清 req_pend / load_inflight ⇒ 下一拍轮播能重新发起。
+                else if (lod_cnt >= LOD_TO_FRAMES) begin
+                    st       <= S_IDLE;
+                    active   <= 1'b0;
+                    may_load <= 1'b0;
+                    prog     <= 9'd256;
+                    mix_mode <= M_PASS;
                 end
             end
 

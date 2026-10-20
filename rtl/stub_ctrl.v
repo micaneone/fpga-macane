@@ -301,6 +301,12 @@ module stub_ctrl #(
                 pf_ready      <= 1'b0;
                 req_pend      <= 1'b0;
                 need_load     <= 1'b0;
+                // ★★★ 2026-10-21 晚【D3 · C1c】转场收尾时把"有一张在路上"也清掉。
+                //   否则 A 被看门狗复位（`a_load_done` 永远不来）⇒ `load_inflight`
+                //   恒 1 ⇒ `need_load` 恒 0 ⇒ ② 再也不会发 `a_start` ⇒ 死锁；
+                //   而像素域 S_LOAD 还在等 `ver` 变 ⇒ 屏幕永远停在旧图。
+                //   转场都结束了，这笔账已无意义（快速路线本来 load_inflight=0）。
+                load_inflight <= 1'b0;
             end
             pf_settle <= tr_done              ? PF_SETTLE :
                          (pf_settle != 16'd0) ? (pf_settle - 16'd1) : 16'd0;
