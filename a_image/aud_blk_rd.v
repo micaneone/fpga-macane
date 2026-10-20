@@ -85,9 +85,16 @@ module aud_blk_rd #(
     input  wire        aud_next,
     output wire        aud_busy,
 
-    // ★★ 2026-10-09【饿死探针】：消费端要一个字、而 FIFO 当时是空的 ⇒ sticky 置起。
-    //   上板一句话就能判"沙沙声是不是因为 SDRAM 读没跟上（FIFO 被饿穿）"。
-    output reg         o_underrun,
+    // ★★★ 2026-10-17【资源分配优化】：删除旧的饿穿探针输出 `o_underrun`。
+    //   ★ 判据（不是猜的）：
+    //     ① 这一版输出侧是 **BRAM 寄存读 + show-ahead**（见下面 2026-10-15 那段），
+    //        `aud_vld` 与 `aud_dout` 严格同拍 ⇒ 消费端看到 vld=0 时**本来就不会拉 next**
+    //        （sfx_player 就是按这个协议写的）⇒ `aud_next && !aud_vld` 实际上永不成立。
+    //     ② 真正在用的饿穿/掐断判据是**块级仲裁器**的 sticky 位：
+    //        `blk_rd_arb.dbg_aud_underrun` → `top_aud.dbg_blk_stall`（端口一字未动）
+    //        → 串口 **字段 12 的 bit1** 与 **字段 30 的 bit10**（`dbg_chain[10]`）。
+    //   ⇒ 旧探针删掉不影响任何判读口径，只是去掉了两份重复的 sticky 逻辑。
+    //   ★ dbg_cnt / dbg_sum / dbg_blk_cnt / o_stall **一个都没动**（字段 31/32/12 要用）。
 
     // ---------------- 诊断 ----------------
     output reg  [15:0] dbg_cnt,         // 本次播放从 SDRAM 收了多少个字（饱和）
@@ -372,12 +379,10 @@ module aud_blk_rd #(
     assign aud_dout = dout_r;
     assign aud_vld  = dout_v;
 
-    // ★★ 2026-10-09【饿死探针】：消费端 `aud_next` 要字、而这一拍 FIFO 里没有 ⇒ sticky。
-    //   注意：只在"这一拍确实在消费"时才算（`aud_next` 本来就是消费脉冲）。
-    always @(posedge clk_aud or negedge rst_aud_n) begin
-        if (!rst_aud_n)         o_underrun <= 1'b0;
-        else if (aud_next && !aud_vld) o_underrun <= 1'b1;
-    end
+    // ★★★ 2026-10-17【资源分配优化】：旧饿穿探针 `o_underrun` 的产生逻辑已删
+    //   （原：`else if (aud_next && !aud_vld) o_underrun <= 1'b1;`）。
+    //   理由见端口表那段 ★ 判据 —— 它在 show-ahead 协议下永不成立，
+    //   真判据走 blk_rd_arb 的 sticky（字段 12 bit1 / 字段 30 bit10）。
 
     // ---- 初始化一下 FIFO 内容（只给仿真用；上电别读 X）----
     //   ★★★ 2026-10-15【搬 BRAM 的硬前提】：数组上**不能有整块 initial 赋值**，

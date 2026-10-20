@@ -60,8 +60,13 @@
 `timescale 1ns / 1ps
 
 module transition_ctrl #(
-    // 每个 vs 边缘 prog 加多少：256/16 = 16 帧 ≈ 0.27 s @60Hz（用户要的"约 0.3 秒"）
-    parameter integer STEP     = 16,
+    // 每个 vs 边缘 prog 加多少。
+    //  ★★★ 2026-10-17【治"画面切换不够丝滑"】原来 STEP=16 ⇒ 整场只有 **16 帧（0.27 s）
+    //    、16 档**，划像一帧要跳 64 px，肉眼就是"一档一档地跳"。现在 STEP=8 ⇒
+    //    **32 帧 ≈ 0.53 s**，而且 transition.v 里三个特效都换成了**软边混合**（逐像素系数）
+    //    ⇒ 同样是 0.53 s，看起来连续得多。
+    //  ★ 想再慢/再细就改这一个数：4 ⇒ 64 帧 ≈ 1.07 s（最丝滑）；16 ⇒ 回到原来的 0.27 s。
+    parameter integer STEP     = 8,
     // 米白至少保持几帧：万一 ver 在发起之前就已经变过，也不至于"一闪而过"
     parameter integer HOLD_MIN = 2
 )(

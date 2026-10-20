@@ -16,7 +16,10 @@
       output        read_done,
       output        read_err,
       output reg    led1,
-      output reg    bus_owner
+      output reg    bus_owner,
+      // ★★★ 2026-10-17【CMD18 多块连续读】：1 = 这次事务允许连续读多块
+      //   （省掉每块一次的卡访问延迟；`top_a` 只在"图像链正在读像素数据"时拉高）
+      input         stream_en
   );
       wire init_done;
       wire i_clk, i_cs, i_mosi;
@@ -69,7 +72,8 @@
           .spi_mosi  (r_mosi),
           .spi_miso  (spi_miso),
           .spi_clk   (r_clk),
-          .spi_cs    (r_cs)
+          .spi_cs    (r_cs),
+          .stream_en (stream_en)         // ★ 多块连续读开关
       );
 
   endmodule

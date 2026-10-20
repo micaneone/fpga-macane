@@ -86,14 +86,12 @@ module subtitle_ovl (
     //     和串口这两个数一比：**对上 ⇒ 片上数据是对的**（问题在显示级）；对不上 ⇒ 数据级。
     output reg  [15:0] o_sum16,
     output reg  [10:0] o_nz,
-    output reg         o_nz_v,
-    // ★★★ 2026-10-11【一次性调试 · 把字幕 RAM 逐字倒出来】：
-    //   自检扫描每跑完一遍，就顺手发布 **第 dp 个字**（下标 0..1599）和它的值，
-    //   dp 每次 +1。顶层把这两格接到串口（字段 21/22/25），配上"每 16 ms 一条帧"
-    //   就能把整条字幕 RAM **一个字不落地**取回来，和电脑上的模型逐字比对。
-    //   ★ 位置/显示都不受影响（扫描本来就是在垂直消隐里跑的）
-    output reg  [10:0] o_dump_idx,
-    output reg  [31:0] o_dump_word
+    //   ★★★ 2026-10-17【资源分配优化】：探针输出口 `o_dump_idx` / `o_dump_word`
+    //     （2026-10-11 的"字幕 RAM 逐字倒出"）已从这里删除 —— 顶层已无消费者
+    //     （串口字段 21/22/25 改送常量 0，帧格式/字段数一字未动）。它们的产生逻辑
+    //     （`dp` 抓字指针、`dump_w`、每遍扫描的比对/发布）随下面那句注释一起删掉；
+    //     ★ 保留的 o_sum16 / o_nz / o_nz_v（字幕指纹，字段 19/20）**一个字没动**。
+    output reg         o_nz_v
 );
 
     // ============================================================
@@ -363,8 +361,8 @@ module subtitle_ovl (
     reg  [31:0] sc_sum;
     reg         sc_nz_v;
     reg  [10:0] sc_nz;
-    reg  [10:0] dp;                  // ★ 抓字指针（每扫完一遍 +1，0..1599 循环）
-    reg  [31:0] dump_w;              // ★ 这一遍抓到的那个字
+    // ★★★ 2026-10-17【资源分配优化】：`dp`（抓字指针）与 `dump_w`（抓到的字）
+    //   随 o_dump_idx/o_dump_word 端口一起删除 —— 它们只服务那个探针，无其他消费者。
     reg         fd1, fd2, fd3;       // clk_mem 的"取完了"toggle → 像素域三级同步
     wire [10:0] rd_addr = sc_run ? ((sc_idx > 12'd1599) ? 11'd1599 : sc_idx[10:0])
                                  : widx;
@@ -383,8 +381,7 @@ module subtitle_ovl (
             col_lo_1 <= 5'd0;
             sc_idx <= 12'd0; sc_run <= 1'b0; sc_sum <= 32'd0;
             sc_nz_v <= 1'b0; sc_nz <= 11'd0;
-            dp <= 11'd0; dump_w <= 32'd0;
-            o_dump_idx <= 11'd0; o_dump_word <= 32'd0;
+            // ★★★ 2026-10-17【资源分配优化】：原 `dp/dump_w` 复位随探针一起删
             fd1 <= 1'b0; fd2 <= 1'b0; fd3 <= 1'b0;
             o_sum16 <= 16'd0; o_nz <= 11'd0; o_nz_v <= 1'b0;
         end
@@ -413,18 +410,18 @@ module subtitle_ovl (
                         sc_nz_v <= 1'b1;
                         sc_nz   <= sc_idx - 12'd1;
                     end
-                    // ★★★ 2026-10-11 调试：正好走到第 dp 个字 ⇒ 把它记下来
-                    if ((sc_idx - 12'd1) == {1'b0, dp}) dump_w <= rd_q;
+                    // ★★★ 2026-10-17【资源分配优化】：
+                    //   原这里还有一句"正好走到第 dp 个字 ⇒ dump_w <= rd_q"（逐字倒出探针的
+                    //   抓字比对）。探针已删 ⇒ 该比对连 12 位比较器一起删掉。
+                    //   ★ 扫描本身一个字没动：sc_sum / sc_nz 照旧（字段 19/20 的生产者）。
                 end
                 if (sc_idx >= 12'd1600) begin
                     sc_run  <= 1'b0;
                     o_sum16 <= sc_sum[15:0];
                     o_nz    <= sc_nz;
                     o_nz_v  <= sc_nz_v;
-                    // ★ 发布这一遍抓到的字，然后指针 +1（下一遍抓下一个字）
-                    o_dump_idx  <= dp;
-                    o_dump_word <= dump_w;
-                    dp <= (dp == 11'd1599) ? 11'd0 : (dp + 11'd1);
+                    // ★★★ 2026-10-17【资源分配优化】：原这里发布 dp 指向的那个字并把 dp+1
+                    //   （o_dump_idx/o_dump_word）。探针已删 ⇒ dp 计数器一并删除。
                 end
                 else sc_idx <= sc_idx + 12'd1;
             end

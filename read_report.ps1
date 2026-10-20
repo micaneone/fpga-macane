@@ -21,7 +21,9 @@
 #    10     flags (see below)
 #    11     A's own pushed-word count, low 16 bits
 #    12     ★★ 2026-10-05: bit0 = reppar (which row-probe group 6..9 shows),
-#           bit1 = 音频仲裁 tag 队列【脱钩过】(sticky). 1 = "杂音/白线是仲裁的锅"。
+#           bit1 = 块级读被掐断/饿穿过 (sticky, aud_blk_stall). 1 = "杂音/白线是读口的锅"。
+#           ★★★ 2026-10-17: this bit1 is now THE underrun criterion (the old
+#           aud_blk_rd.o_underrun probe was removed -- it could never fire).
 #    13     lb_wbase   requested row-start word address (low 16)
 #    14     lb_rd0     first word actually received (low 16)
 #    15     lb_rd1     second word actually received (low 16)
@@ -29,21 +31,31 @@
 #    17   * current ZOOM LEVEL 0..5  (0=fit 1=1x 2=1.5x 3=2x 4=3x 5=4x)
 #           -- NEW in M2; field 17 used to be the cmp_off knob
 #    18     KEY1 press count
-#    19     lb_off      first kept word minus requested row start
-#    20     lb_alignbad words whose value is not their own address
-#    21..24 scan group index / pass index / A's a_wr_len (low, high)
-#    25..28 ★ 2026-10-04 写侧镜像（原来是 M1 时代的扫描字 px4..px7）：
-#           25 = 引擎"写字"拍数低 16 位（= 引擎写进 SDRAM 的字数，累计）
-#           26 = 引擎开过多少次写突发       27 = 读写同拍的拍数（累计）
-#           28 = ★★ 2026-10-05 改成【音频链状态位图】（原来是保留 0）。
+#    19     ★★ subtitle fingerprint: low 16 of the SUM of the 1600 on-chip
+#           subtitle-RAM words (expect C003 for "hello, world")
+#    20     ★★ subtitle fingerprint: bit15 valid | bits10:0 first non-zero word
+#           index (expect 0951 = index 337)
+#    21,22,25 ★★★ 2026-10-17: now CONSTANT 0.  These three carried the
+#           "dump the subtitle RAM word by word" probe (2026-10-11); that probe
+#           was deleted together with its generators (subtitle_ovl o_dump_idx /
+#           o_dump_word, plus dp/dump_w) -- frame format / field count unchanged.
+#    23,24  A's requested segment length a_wr_len (low 16 + high 5)
+#    26     ★★★ 2026-10-17: now CONSTANT 0 (was the old aud FIFO underrun probe,
+#           which could never fire under the show-ahead read protocol).
+#           Use field 12 bit1 (aud_blk_stall) as the underrun criterion.
+#    27     ★ sel_aud = which .WAV is currently selected (01/02/03/04) -- KEPT
+#           (this is the readout for the SW3 audio-select switch).
+#    28     audio-chain status bitmap (see below)
 #                位号是【字段自身的】：bit15 aud_fail / bit14 aud_loaded /
 #                bit13 音频PLL锁 / bit12 aud_busy / bit11 有音频数据流 /
 #                bit10 play_tgl 在翻 / bit9:8 小状态机（0等图 1等待 2装载音效 3做完）
 #                期望顺序：20xx（PLL 锁）-> 60xx（音效装完）-> 68xx（有数据流）
 #                -> 播放中 bit10 在 4/C 之间跳；播完 loaded 一直留着（一直 6xxx）
 #           ★ A 的段长度在【字段 23/24】里（a_wr_len 的低 16 + 高 5），别在这里找。
-#           ★ 用法：25 的低 16 位应当等于 字段 11（A 自己推的字数）；
-#             27 只要不是 0，就说明读写真的同拍过。
+#           ★★★ 2026-10-17: field 25 is now constant 0 (the "engine write-beat
+#           count mirror" is gone with the subtitle dump probe); field 27 is
+#           sel_aud, NOT clash_cyc -- so "27 != 0 means read/write clashed" is
+#           NO LONGER VALID.  Read/write clash is field 10 (dbg_flags) bit15.
 #    29     ★★ 2026-10-08: rd_defer_max = 显示读请求"举着但没被授权"的**最长连续拍数**
 #             (原为 10-01 那次 SDRAM busy/refresh 实验的 sticky 位图，实验早结束)
 #             判读：0~10 拍 = 正常（等官方控制器 ack 的握手）；几百拍 = 被写突发挡过。
@@ -58,6 +70,8 @@
 #           bit4 官方受理 / bit5 真的发过 App_rd_en / bit6 行缓冲 o_want 到过 / bit7 读口锁到过
 #           bit8 ★ 读忙(O_rd_busy) 与 写忙(O_wr_busy) **同拍都高**过（该互斥，同拍高=互锁没拦住）
 #           bit9 ★ 显示读请求被推迟超过 200 拍过（≈1.6 µs；有它=写突发确实挡过显示）
+#           bit10 ★★★ 2026-10-17: now always 0 (the old per-FIFO underrun probe was
+#                 removed -- it could never fire).  Use field 12 bit1 instead.
 #        字段 31 = 本次播放收了多少音频字（期望 1940）
 #        字段 32 = 那些字的 32 位和的低 16 位（期望 4411）
 #           Compare (30, 31, 32) with the same numbers computed from SFX0.WAV on the PC:
@@ -85,7 +99,7 @@
 #  Usage:  powershell -ExecutionPolicy Bypass -File .\read_report.ps1 [seconds]
 #  *** KEEP THIS FILE PURE ASCII ***
 # ============================================================
-param([int]$Seconds = 8, [string]$Port = 'COM11')
+param([int]$Seconds = 8, [string]$Port = 'COM3')
 
 $sp = New-Object System.IO.Ports.SerialPort
 $sp.PortName = $Port; $sp.BaudRate = 115200

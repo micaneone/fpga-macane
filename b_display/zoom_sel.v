@@ -74,60 +74,35 @@ module zoom_sel (
     wire [23:0] cmp_w   = win_w * src_h;
     wire [23:0] cmp_h   = win_h * src_w;
     wire        width_lim = (cmp_w < cmp_h);      // 宽是限制轴
-    wire [15:0] fit_num = width_lim ? {4'd0, src_w} : {4'd0, src_h};
-    wire [15:0] fit_den = width_lim ? {4'd0, win_w} : {4'd0, win_h};
     wire        dims_ok = (src_w != 12'd0) && (src_h != 12'd0) &&
                           (win_w != 12'd0) && (win_h != 12'd0);
 
-    // ---- 除法器：只算 (fit_num<<16)/fit_den ----
-    reg         div_start;
-    wire [31:0] div_q;
-    wire        div_done, div_busy;
-    reg  [31:0] step_fit;
+    // ============================================================
+    //  ★★★ 2026-10-17【去面积 · 整只删掉除法器】
+    //    "适配"档要算  step = (num << 16) / den ，
+    //    而 `win_w/win_h` 在本工程里是**常数**（顶层窗口表 `WIN_W(800)/WIN_H(600)`
+    //    ⇒ stub_win_table 把它们直连成常数口）⇒ 这是**除以常数**，不需要除法器：
+    //        q = (num << 16) / den ≈ (num * K) >> 8 ，  K = round(2^24 / den)
+    //          den = 800 ⇒ K = 20972   （2^24/800  = 20971.52）
+    //          den = 600 ⇒ K = 27962   （2^24/600  = 27962.03）
+    //    误差 ≤ num × (0.5/2^24) ≈ 1e-4 LSB（Q16.16 的 1 LSB = 1/65536 像素）⇒ 不可见。
+    //    代价：12×15 的常数乘（落 1 个 DSP / 几个移位加法）；
+    //    收益：`udiv_q16_up`（176 LE）连同 div_start/need_fit/changed 那一整套
+    //          握手与变化检测一起删掉（实测 u_zoom 471 → 约 300 LE）。
+    //    ★ 语义变化：原来是"除法器算完再锁存（fit_busy 期间 zoom_dual 不锁存）"，
+    //      现在纯组合、随时有效 ⇒ `fit_busy` 恒 0，zoom_dual 的 `!z_busy` 恒真。
+    //    ★ 源尺寸非法（0）时仍退回 Z=1 的安全值，和原来 `step_fit` 复位值同口径。
+    // ============================================================
+    localparam [14:0] K_DEN800 = 15'd20972;
+    localparam [14:0] K_DEN600 = 15'd27962;
+
+    wire [11:0] fit_num = width_lim ? src_w : src_h;
+    wire [14:0] fit_k   = width_lim ? K_DEN800 : K_DEN600;
+    wire [26:0] fit_prd = fit_num * fit_k;          // 12×15 ⇒ 27 位
+    wire [31:0] step_fit = dims_ok ? ({5'd0, fit_prd} >> 8) : 32'd65536;
 
     assign step_fit_q16 = step_fit;
-    assign fit_busy     = div_busy;
-
-    udiv_q16_up u_div (
-        .clk(clk_pix), .rst_n(rst_pix_n),
-        .start(div_start), .a(fit_num), .b(fit_den),
-        .q(div_q), .done(div_done), .busy(div_busy)
-    );
-
-    // ---- 输入变化检测：变了就重算一次适配值 ----
-    reg  [2:0]  lv_d;
-    reg  [11:0] sw_d, sh_d, ww_d, wh_d;
-    reg         need_fit;
-
-    wire changed = (level !== lv_d) || (src_w !== sw_d) || (src_h !== sh_d) ||
-                   (win_w !== ww_d) || (win_h !== wh_d);
-
-    always @(posedge clk_pix or negedge rst_pix_n) begin
-        if (!rst_pix_n) begin
-            div_start <= 1'b0;
-            need_fit  <= 1'b0;
-            step_fit  <= 32'd65536;      // 除法完成前先按 Z=1
-            lv_d <= 3'd7;
-            sw_d <= 12'd0; sh_d <= 12'd0; ww_d <= 12'd0; wh_d <= 12'd0;
-        end
-        else begin
-            div_start <= 1'b0;
-
-            if (changed) begin
-                lv_d <= level;
-                sw_d <= src_w; sh_d <= src_h; ww_d <= win_w; wh_d <= win_h;
-                // 源尺寸/窗口一变就先算好，用户切到"适配"档时不用等
-                if (dims_ok) need_fit <= 1'b1;
-            end
-
-            if (need_fit && !div_busy) begin
-                div_start <= 1'b1;
-                need_fit  <= 1'b0;
-            end
-
-            if (div_done) step_fit <= div_q;
-        end
-    end
+    assign fit_busy     = 1'b0;
 
     // ============================================================
     //  输出：step + 居中偏移

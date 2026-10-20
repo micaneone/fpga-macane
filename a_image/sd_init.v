@@ -216,6 +216,9 @@ my_spi #(
     .spi_miso(spi_miso),
     .spi_clk(spi_clk),
     .spi_cs(spi_cs),
-    .spi_mosi(spi_mosi)
+    .spi_mosi(spi_mosi),
+    // ★★★ 2026-10-17：`my_spi` 新增了 SCLK 使能（给 CMD18 多块读"两块之间停时钟"用）。
+    //   初始化这条**必须恒 1**（漏接会悬空成 z ⇒ 初始化时钟不走 ⇒ 卡永远 init 不完）。
+    .spi_clk_en(1'b1)
 );
 endmodule

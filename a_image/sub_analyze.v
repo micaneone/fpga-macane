@@ -95,6 +95,22 @@
           input         fe_busy,
           input         fe_err,
 
+          // ---- ★★★ 2026-10-16【切法C·find_bmp 合流】：查文件请求/结果口 ----
+          //   本链不再自带 FAT/目录状态机，这 8 根原样引到 top_a，
+          //   由 top_a 接到【全局唯一一份】`find_bmp_eng`（u_find_eng）上。
+          output [23:0] eng_ext,        // → 引擎：本链扩展名（= TARGET_EXT "SUB"）
+          output [3:0]  eng_skip,       // → 引擎：本链 skip（引擎在 start 那拍锁存）
+          output        eng_start,      // → 引擎：本链要查文件
+          output        eng_owner,      // → 引擎：1 = 装字幕这条当家 → 接 u_find_eng.owner
+          input  [31:0] eng_lba_i,      // ← 引擎：引擎自己算的扇区地址
+          input         eng_req_i,      // ← 引擎：引擎自己的读请求
+          input         eng_busy,       // ← 引擎：引擎自己的 busy
+          input         eng_done,       // ← 引擎：查到了
+          input         eng_fail,       // ← 引擎：查不到 / 卡 / 坏卡
+          input  [31:0] eng_sector,     // ← 引擎：file_sector（已打拍）
+          input  [31:0] eng_size,       // ← 引擎：file_size  （已打拍）
+          input  [31:0] eng_cluster,    // ← 引擎：file_cluster（已打拍）
+
           // ---- 命令 ----
           input         start,          // 拉高一拍开始
           input  [3:0]  skip,           // ★ 第几个 .SUB（和 .BMP / .WAV 各算各的）
@@ -513,7 +529,21 @@
               .rd_err  (rd_err),
 
               .led1      (led_init),
-              .bus_owner (sd_ready)
+              .bus_owner (sd_ready),
+
+              // ---- ★★★ 2026-10-16【切法C·find_bmp 合流】----
+              .eng_ext     (eng_ext),
+              .eng_skip    (eng_skip),
+              .eng_start   (eng_start),
+              .eng_owner   (eng_owner),
+              .eng_lba_i   (eng_lba_i),
+              .eng_req_i   (eng_req_i),
+              .eng_busy    (eng_busy),
+              .eng_done    (eng_done),
+              .eng_fail    (eng_fail),
+              .eng_sector  (eng_sector),
+              .eng_size    (eng_size),
+              .eng_cluster (eng_cluster)
           );
 
       endmodule

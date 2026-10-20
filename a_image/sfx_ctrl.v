@@ -33,6 +33,15 @@ module sfx_ctrl #(
 
     // ---- 从 C 轨来 ----
     input  wire        play_sfx,        // 单拍脉冲：开始播
+    // ★★★ 2026-10-17【修 · 换音频失真】`stop_sfx` = 单拍脉冲：立刻停止播放。
+    //   为什么必须有它：下面那句判据是 `!busy` 才收命令（"播放中忽略新命令"），
+    //   而 `busy`（= sdr_rd_arb 的 `a_run`）要等**整首词全部发完**才落，
+    //   且装载期间音频读被 `disp_rd_gate` 掐断 ⇒ `busy` 在装载后还要挂很久。
+    //   ⇒ 换歌时"先装新数据、再发 play"的话，play 会被这里丢掉：
+    //     旧播放指针（旧 base/旧字数）继续去读**已经被覆写**的那片区域
+    //     ⇒ 用户听到的"失真/串味"。停一下就没这个竞态了：
+    //     停止 ⇒ busy 落 ⇒ 装载（本次装载期间区域无读，也干净）⇒ play 必被接收。
+    input  wire        stop_sfx,        // ★ 单拍脉冲：立刻停（字数清 0 + 翻 toggle）
     input  wire  [3:0] sfx_id,          // 第几条（0 ~ SFX_NUM-1）
     input  wire  [7:0] volume,          // 音量
     input  wire  [20:0] words_act,    // ★★★ 本次装入音效的【实际字数】（0 = 未知，退回 SFX_STRIDE）
@@ -58,7 +67,14 @@ module sfx_ctrl #(
             sfx_words <= 21'd0;
         end
         else begin
-            if (play_sfx && id_ok && !busy) begin
+            if (stop_sfx) begin
+                //  ★ 停止 = "新命令 + 0 字"：sdr_rd_arb 收到后 a_iss >= a_words_r 立即成立
+                //    ⇒ 下一拍 a_run 就落 ⇒ 不再发读；FIFO 里剩下的旧采样自己淡出。
+                //  ★ 不受 `!busy` 限制 —— 它本来就是用来打断正在播的那一首的。
+                sfx_words <= 21'd0;
+                play_tgl  <= ~play_tgl;
+            end
+            else if (play_sfx && id_ok && !busy) begin
                 //  ★ 基址 = 音效区基址 + 条号 × 每条长度
                 sfx_base  <= SFX_BASE + sfx_id * SFX_STRIDE[20:0];
                 sfx_words <= (words_act != 21'd0) ? words_act : SFX_STRIDE[20:0];   // ★ 播放长度 = 实际字数（治「太短」+「放完后的杂音」）

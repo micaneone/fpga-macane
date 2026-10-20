@@ -48,14 +48,25 @@ module stub_ctrl #(
     //   原因（上板实测）：那颗 SDRAM 核"4 字一包"的分组**读写都认**，写侧没法补对齐，
     //   所以槽基址本身必须 4 对齐；否则写进大槽 1 的图会"每隔几列一小条"（竖条错位）。
     parameter integer SLOT1_BASE    = 930832,  // 大槽 1（转场要用的后台槽）
-    parameter integer AUTO_START    = 1        // 0 = 上电不自动装（只等 key1）
+    parameter integer AUTO_START    = 1,       // 0 = 上电不自动装（只等 key1）
                                                //   ★ B 自测图模式要设 0，
                                                //     否则 A 会把自测图覆盖掉
+    // ★★★ 2026-10-17【自动轮播】：卡上根目录里 .BMP 的**条数**，轮播数到第 IMG_N 张
+    //   之后回绕到第 0 张。素材变了只改这一个参数。
+    //   ★ 为什么要回绕：轮播会一直自己跑，`skip` 一旦超过卡上图片数，`find_bmp` 就查不到
+    //     文件 ⇒ `a_fail` ⇒ 音频链一起停住（以前手动多按几次也是同一个坑）。
+    parameter integer IMG_N         = 5
 )(
     input  wire        clk,
     input  wire        rst_n,          // 引脚复位（硬复位）
     input  wire        key1,           // 低有效
     input  wire        key2,           // 低有效
+    // ★★★ 2026-10-17【KEY3 改自动轮播】：顶层产生的"换下一张"请求（单拍脉冲）。
+    //   和按键 `key1` 的消抖脉冲**同一个语义、同一条路**（下面 `adv_take` 把它们或起来）。
+    //   顶层已经用 `!a_busy & !tr_active & !req_pend` 把脉冲挡在空闲窗口里，
+    //   所以这里不需要额外判据 —— 落进来的脉冲一律按"换下一张"处理。
+    //   ★ 按键那条路照旧保留（本模块内部一个字没删），只是顶层不再喂按键了。
+    input  wire        adv_req,
     input  wire        sd_ready,       // A：SD 卡初始化完成
     input  wire        a_busy,         // A：正在装载（装载期间不再触发）
     input  wire        hold,           // 1 = 别触发（B 自测图正在写大槽 0）
@@ -101,6 +112,11 @@ module stub_ctrl #(
     key_press_debounce #(.CLK_FREQ_HZ(CLK_HZ), .DEBOUNCE_MS(20)) u_k2 (
         .clk(clk), .rst(~rst_n), .button_in(key2), .press_pulse(k2_press)
     );
+
+    // ★★★ 2026-10-17【KEY3 改自动轮播】：换图触发 = 按键消抖脉冲 或 轮播请求
+    //   ★ 只在两处消费（`req_take` 的受理判据、受理分支里的特效轮换），
+    //     下面的状态机其余部分**一个字没动**。
+    wire adv_take = k1_press | adv_req;
 
     // ============================================================
     //  软复位发生器：只受引脚复位控制（见文件头那段说明）
@@ -169,7 +185,7 @@ module stub_ctrl #(
     //       完全一致，本来就是这样。）
     wire req_take = sd_ready && !tr_active && !tr_done && !req_pend && !hold &&
                     ((AUTO_START && !auto_fired && (auto_cnt >= AUTO_TICKS[31:0]))
-                     || k1_press);
+                     || adv_take);
 
     always @(posedge clk or negedge ctl_rst_n) begin
         if (!ctl_rst_n) begin
@@ -227,7 +243,7 @@ module stub_ctrl #(
                     fx_sel     <= 2'd0;                    // 上电第一张：划像
                     auto_fired <= 1'b1;
                 end
-                else if (k1_press) begin
+                else if (adv_take) begin
                     req_pend <= 1'b1;
                     req_tgl  <= ~req_tgl;
                     // 每换一张轮换一种特效：划像 → 百叶窗 → 交叉淡化 → 划像…
@@ -246,7 +262,7 @@ module stub_ctrl #(
                 a_start  <= 1'b1;
                 a_skip   <= next_no[3:0];
                 a_img_no <= next_no + 8'd1;
-                next_no  <= next_no + 8'd1;
+                next_no  <= (next_no == (IMG_N-1)) ? 8'd0 : (next_no + 8'd1);   // ★ 轮播回绕
                 req_pend <= 1'b0;
                 need_load <= 1'b0;
                 load_inflight <= 1'b1;                 // ★ 预装：记下"有一张在路上"
@@ -265,7 +281,7 @@ module stub_ctrl #(
                 a_start       <= 1'b1;
                 a_skip        <= next_no[3:0];
                 a_img_no      <= next_no + 8'd1;
-                next_no       <= next_no + 8'd1;
+                next_no       <= (next_no == (IMG_N-1)) ? 8'd0 : (next_no + 8'd1);  // ★ 轮播回绕
                 load_inflight <= 1'b1;
             end
 

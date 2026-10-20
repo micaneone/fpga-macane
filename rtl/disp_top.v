@@ -82,6 +82,12 @@ module disp_top #(
     //   ★ 它只往 subtitle_ovl 里传，本模块自己一个门都不加（纯接线）。
     //   ★ 域：和 sub_on 等一样是 clk_pix 域的慢变电平 ⇒ 直接接，不用再打拍。
     input  wire        sub_scroll,
+
+    // ★★★ 2026-10-16【清理冗余 viz】：这里原来还有 8 个输入端口
+    //   （viz_hist_mask/band/color、viz_freq_mask/band/color、dbg_viz_freq_win/dump），
+    //   是队友那套 viz_top 的像素域输出与诊断线 —— 该套已摘除，端口一并删掉。
+    //   ★ 它们**从来就没有驱动源**（顶层 top_m2 只是把它们声明成悬空网线再喂进来），
+    //     所以删掉对任何既有画面、任何既有逻辑都是零影响。
     // ---------------- ★★★ 2026-10-15【参数菜单·第1步】菜单面板（像素流水第 ④' 级）----------------
     //   ★ 位置：**subtitle_ovl 之后、RGB565→RGB888 之前** —— 菜单盖在字幕之上。
     //   ★ 这两根都是 clk_pix 域的**慢变电平**（顶层把 sw2/sw1 两级同步 + 菜单状态机
@@ -89,7 +95,37 @@ module disp_top #(
     //   ★ 参数**不给默认值**：和 sub_on 那一组同一口径 —— 顶层必须显式接，
     //     漏接会让综合报"端口未连接"而不是悄悄接 0（菜单那一路要的正是"漏接就报错"）。
     input  wire        menu_on,       // 1 = 画菜单面板；0 = 逐位透传
-    input  wire [1:0]  menu_sel,      // 选中行 0..3（本步只挪高亮条；第 2 步选参数）
+    input  wire [2:0]  menu_sel,      // 选中行 0..4（`>` 光标跟着它走；★ 2026-10-18 起 5 行 ⇒ 3 位）
+    // ---------------- ★★★ 2026-10-15【参数菜单·第2步】要显示的"活值" ----------------
+    //   ★ 这两根纯接线：本模块一个门都不加，直接透传给 `menu_ovl` 去查字模。
+    //   ★ **只读**：菜单只是"显示"这两个值，本步**没有任何写回**（第 3 步才通过
+    //     KEY2"确定"去改音量寄存器）。所以对既有画面/既有逻辑零影响。
+    //   ★ 域：都是 clk_pix 域的慢变电平（top_m2 里各打了两级同步），不需要再打拍。
+    //   ★ 同样**不给默认值**（与 menu_on 那一组同口径）：漏接直接报"端口未连接"。
+    input  wire [2:0]  menu_zoom_lv,  // 缩放档 0..5 ⇒ 行 0 的数值
+    input  wire [1:0]  menu_sel_aud,  // 音频条号 0..3 ⇒ 行 1 显示 sel_aud + 1 = 1..4
+    // ★★★ 2026-10-17【音量进菜单】：行 2 `VOLUME` 的活值 0..15（两位十进制显示）
+    input  wire [3:0]  menu_vol,
+    // ★★★ 2026-10-17【亮度进菜单】：行 3 `BRIGHT` 的活值 0..15（15 = 原样）。
+    //   ★ 它不只是"显示"，还真的改变画面：本模块在**字幕之后、菜单之前**插一级
+    //     `bri_scale`，把"画面 + 可视化 + 字幕"整体缩放 ⇒ **菜单面板本身不压暗**
+    //     （否则亮度调到很低时菜单自己也看不清，就再也调不回来了）。
+    //   ★ 0 拍延迟的纯组合，所以菜单的 `mx2/my2` 坐标对齐**不受影响**。
+    input  wire [3:0]  menu_bri,
+    // ★★★ 2026-10-18【可视化总开关进菜单】：行 4 `VISUAL` 的活值 1 = 显示 / 0 = 关闭。
+    //   ★ 它同时决定"菜单里显示 ON 还是 OFF"，以及**本模块要不要把可视化层叠上去**
+    //     （见下面 `viz_off` 的门）。0 拍延迟的纯组合门，不影响任何坐标对齐。
+    //   ★ 关掉时：`viz_time` / `viz_freq` 照样在后台跑（只旁听音频，不占 CPU 概念），
+    //     打开就能立刻有图 —— 不用等它重新统计一帧。
+    input  wire        menu_viz_on,
+    // ★★★ 2026-10-17【音频可视化（队友 viz_top）】：音频域那几根直接从顶层引进来。
+    //   `aud_vld/aud_dout/aud_next` 是 `top_aud` 的**只读**握手副本（viz 只旁听，
+    //   绝不驱动 aud_next —— 驱动了就是重复消费、音频会断，见队友文档 §5③）。
+    input  wire        clk_aud,
+    input  wire        rst_aud_n,
+    input  wire        aud_viz_vld,
+    input  wire [31:0] aud_viz_dout,
+    input  wire        aud_viz_next,
     // 读口第三个客户（→ blk_rd_arb 的 s_* 那一组）
     output wire        s_blk_req,
     output wire [20:0] s_blk_base,
@@ -104,8 +140,9 @@ module disp_top #(
     output wire [15:0] o_sub_sum16,   // ★ 指纹：片上字幕 RAM 求和的低 16 位
     output wire [10:0] o_sub_nz,      // ★ 指纹：第一个非零字的下标
     output wire        o_sub_nz_v,
-    output wire [10:0] o_sub_dump_idx,   // ★ 2026-10-11 调试：逐字倒出（下标）
-    output wire [31:0] o_sub_dump_word,  // ★ 2026-10-11 调试：逐字倒出（值）
+    // ★★★ 2026-10-17【资源分配优化】：`o_sub_dump_idx` / `o_sub_dump_word`
+    //   （2026-10-11 的"字幕 RAM 逐字倒出"调试口）已删 —— 顶层已无消费者。
+    //   同名字段（串口 21/22/25）改送常量 0，帧格式/字段数一字未动。
 
     // ---------------- 窗口（来自 stub_win_table）----------------
     input  wire        win_on,
@@ -283,6 +320,19 @@ module disp_top #(
     );
 
     // ============================================================
+    //  ★★★ 2026-10-17【音频可视化整层砍除】
+    //     这里原来是**两级叠图**，现在都删了：
+    //       ① 队友那套 24 级梯级 viz（viz_top → viz_time / viz_freq / 2×viz_render）
+    //          实测 mslice 5564 > 硬墙 4900 ⇒ phy 报 PHY-9009，M2.bit 根本生不出来；
+    //       ② 自研的 `b_display/viz_bars.v`（8 点 Goertzel 频谱柱）—— 修好之后能出谱了，
+    //          但实拍效果不合格，且它吃 +2228 LUT / +551 mslice（mslice 只剩 200 出头）。
+    //     ⇒ **整层砍掉**：例化、端口、`VIZ2_ON` 开关、`px_v` 合成 mux 全删。
+    //     ⇒ 现在的像素流水是：转场输出 `px_mix` → subtitle_ovl → menu_ovl → 565→888。
+    //     ⇒ 代码/仿真台/定参脚本都移到仓库外了：
+    //        `E:\FPGA\ygcom\.viz_backup_20261017\`（要复活就去那里拿，M2.al 加一行就回来）。
+    // ============================================================
+
+    // ============================================================
     //  ★★★ 2026-10-08【字幕叠加】—— 像素流水第 ④ 级
     //    转场之后、565→888 之前。**1bpp 遮罩：bit=1 画黑（字）、bit=0 透传**。
     //    ★ 坐标用 `o_dbg_x/o_dbg_y`：那两行注释写着"和送 HDMI 的 de_mix/px_mix
@@ -292,10 +342,124 @@ module disp_top #(
     wire [15:0] px_z;
     wire        de_z, vs_z;
 
+    // ============================================================
+    //  ★★★ 2026-10-17【音频可视化 · 只装时域那半边（试装）】
+    //   整套（`viz_top` = viz_time + viz_freq + 2×viz_render）实测 **4,502 LUT**，
+    //   而设备的 **mslice 上限 4900** 是独立预算：加完用 5249 ⇒ 超 349（硬报错
+    //   `PHY-9009`，不是布线问题）⇒ 整套上不去。
+    //   只装时域 → 1,284 LUT（viz_time 105 + 柱状渲染 1,179）⇒ 稳稳能装。
+    //   ⇒ 这里**直接例化 viz_time + viz_render**，不经过 `viz_top`；
+    //     频域那半边接常数 0（合成时自然被裁掉）。要整套就换回 `viz_top`，
+    //     但先把 mslice 从别处腾出约 350（最大一块是 `win_compositor`+`scaler_addr`
+    //     的双路缩放 = 16 DSP / 约 580 mslice）。
+    // ============================================================
+    wire        viz_hist_mask, viz_hist_band;
+    wire [23:0] viz_hist_color;
+    wire        viz_wr_en;
+    wire [4:0]  viz_wr_addr;
+    wire [5:0]  viz_wr_val;
+    wire [15:0] viz_dbg_win;
+    wire        viz_dbg_dump;
+    //   频域那半边：★ 2026-10-17【已试过，**按用户判定撤下**】
+    //   实测（整套 viz_top，24 段）：4,507 LUT；卡在独立预算 `mslice`（上限 4900）
+    //   ⇒ `PHY-9009` 超 349，整套上不了。
+    //   退一步试 12 段（C1）：能建，但 **96.23% slices + Hold WNS −41 ps（保持违例）**，
+    //   而用户看过谱形后判定"一般，不值得" ⇒ **只保留时域那半边，频域接常数 0**。
+    //   ★ 想再启用：把下面两条 `= 0` 换成 viz_freq + viz_render（参数见 `viz2/viz_top.v`
+    //     的 `u_freq` / `u_freq_draw` 两段），代价见上面两个数字。
+    wire        viz_freq_mask, viz_freq_band;
+    wire [23:0] viz_freq_color;
+
+    viz_time #(
+        .N       (32),
+        .SMP_WIN (1500),
+        .GAIN    (6'd16)
+    ) u_viz_hist (
+        .clk_aud   (clk_aud),
+        .rst_aud_n (rst_aud_n),
+        .aud_vld   (aud_viz_vld),
+        .aud_dout  (aud_viz_dout),
+        .aud_next  (aud_viz_next),
+        .wr_en     (viz_wr_en),
+        .wr_addr   (viz_wr_addr),
+        .wr_val    (viz_wr_val),
+        .dbg_addr  (),
+        .dbg_peak  (),
+        .dbg_cnt   (viz_dbg_win)
+    );
+
+    // ★★★ 2026-10-18【用户反馈"下降太慢"】：缓降速度 ×3、峰值回落同步加快
+    //   viz_render 的口径：每隔 DECAY_DIV 拍降【一根】柱子 1 格，指针走一圈 = N×DECAY_DIV
+    //   拍 ⇒ 满格 63 格掉光 = 63×N×DECAY_DIV / 12.288MHz
+    //     改前 N=32、DECAY_DIV=36571 ⇒ 63×32×36571/12.288e6 ≈ **6.0 s**
+    //     改后 DECAY_DIV=12200     ⇒ ≈ **2.0 s**（快 3 倍）
+    //   峰值点原来落后 4 倍（≈24 s），跟 2 s 的柱子差太多 ⇒ PEAK_SLOW 4→2（≈4 s），
+    //   仍然是"比柱子慢"，但一眼能看出它在回落。
+    //   ★ 还想更快/更慢就只改这两个数：满格秒数 ≈ 63×N×DECAY_DIV/12.288e6
+    viz_render #(
+        .N          (32),
+        .CELL_SHIFT (3),
+        .VIS_X      (10'd16),
+        .VIS_Y      (10'd392),
+        .BAR_H      (10'd64),
+        .DECAY_DIV  (12000),
+        .PEAK_SLOW  (4'd2),
+        // ★★★ 2026-10-19【用户："太快了"】：浮标从 ≈1 s 放慢到 **≈3 s**（柱子仍 2 s）
+        //   ⇒ 比柱子慢 1.5 倍：有明显"峰值保持"手感，又不像 4 s 那么黏。
+        //   口径：满格落地 = 63×N×PEAK_DIV/12.288e6
+        //         N=32 ⇒ 63×32×18000/12.288e6 ≈ **2.95 s**（N=24 用 24000 也是 ≈2.95 s）
+        //   ★ 以后想微调只改 `PEAK_DIV`：秒数 ≈ 6095×(秒)  [N=32] / 8127×(秒)  [N=24]
+        .PEAK_FAST  (4'd0),
+        .PEAK_DIV   (18000),
+        .GAP        (1),
+        .COL_B      (8'd24)
+    ) u_viz_hist_draw (
+        .clk_aud   (clk_aud),
+        .rst_aud_n (rst_aud_n),
+        .wr_en     (viz_wr_en),
+        .wr_addr   (viz_wr_addr),
+        .wr_val    (viz_wr_val),
+        .de        (de_mix),
+        .x         (o_dbg_x[9:0]),
+        .y         (o_dbg_y[9:0]),
+        .mask      (viz_hist_mask),
+        .in_band   (viz_hist_band),
+        .color     (viz_hist_color)
+    );
+
+    // ★★★ 2026-10-20【D1 · A1 砍频域】：24 段频域整块下线
+    //   · 为什么砍：它是面积里最贵的一块（+2,585 LUT / +1,386 slices / +1 DSP），
+    //     而商显/应急定位下屏上两条柱子是视觉噪音（2026-10-19 评审结论）。
+    //   · 砍完不再有实例驱动 viz_freq_mask/band/color ⇒ 下面三根接常数；
+    //     时域 32 柱保留 ⇒ 评分项⑤“音频可视化”仍然成立。
+    //   · ★ 想恢复：把 viz2/viz_top.v 的 u_freq / u_freq_draw 两段抄回来
+    //     （N=24 / SMP_WIN=2048 / LOG_BIAS=16 / VIS_Y=312），再删掉下面三根 0。
+    assign viz_freq_mask  = 1'b0;
+    assign viz_freq_band  = 1'b0;
+    assign viz_freq_color = 24'd0;
+
+    // ★★★ 2026-10-18【菜单行 4 `VISUAL` = 可视化总开关】
+    //   `viz_off` = 关掉时把"柱形遮罩"和"矩形压暗"一起门掉 ⇒ `px_v` 逐位等于 `px_mix`
+    //   （= 屏幕上完全看不到可视化，连那块压暗的底也不会留）。
+    //   ★ 用"门 mask/band"而不是"在最后 mux 上选" ：少一级 16 位 mux，面积更省。
+    wire        viz_off = ~menu_viz_on;
+    wire        viz_m   = (viz_hist_mask | viz_freq_mask) & ~viz_off;
+    wire [23:0] viz_c24 = viz_hist_mask ? viz_hist_color : viz_freq_color;  // 重叠时历史优先
+    wire [15:0] viz_c16 = {viz_c24[23:19], viz_c24[15:10], viz_c24[7:3]};
+    wire        viz_dim = (viz_hist_band | viz_freq_band) & ~viz_m & ~viz_off;
+    //  压暗：565 每个通道各右移 1 位
+    wire [15:0] viz_dim16 = {1'b0, px_mix[15:12], 1'b0, px_mix[10:6], 1'b0, px_mix[4:1]};
+    wire [15:0] px_v = viz_m   ? viz_c16
+                     : viz_dim ? viz_dim16
+                     :           px_mix;
+
     subtitle_ovl u_sub (
         .clk_pix(clk_pix), .rst_pix_n(rst_pix_n),
         .de_in(de_mix), .vs_in(vs_mix),
-        .x_in(o_dbg_x), .y_in(o_dbg_y), .px_in(px_mix),
+        .x_in(o_dbg_x), .y_in(o_dbg_y),
+        // ★ 2026-10-17：吃"转场输出 + 可视化叠加"这一级（`px_v`）。
+        //   没有可视化时它逐位等于 `px_mix`。
+        .px_in(px_v),
         .px_out(px_z), .de_out(de_z), .vs_out(vs_z),
         // ★★ 2026-10-09：整条字幕在【显存域】取回来（读口那个域），像素侧在 clk_pix
         .clk_mem(clk_mem), .rst_mem_n(rst_mem_n),
@@ -311,7 +475,7 @@ module disp_top #(
         .mem_dv(s_blk_dv), .mem_data(s_blk_data), .mem_fin(s_blk_fin),
         .o_row_cnt(o_sub_row_cnt), .o_hit(o_sub_hit)
         ,.o_sum16(o_sub_sum16), .o_nz(o_sub_nz), .o_nz_v(o_sub_nz_v)
-        ,.o_dump_idx(o_sub_dump_idx), .o_dump_word(o_sub_dump_word)
+        // ★★★ 2026-10-17【资源分配优化】：`.o_dump_idx/.o_dump_word` 两条接线已删
     );
 
     // ============================================================
@@ -342,6 +506,24 @@ module disp_top #(
         end
     end
 
+    // ============================================================
+    //  ★★★ 2026-10-17【菜单·亮度】亮度缩放级（**组合、0 拍延迟**）
+    // ------------------------------------------------------------
+    //  位置：`subtitle_ovl` 的输出（px_z）→ **[本模块 bri_scale]** → `menu_ovl`
+    //    ⇒ 被压暗的是"画面 + 可视化柱 + 字幕"；**菜单面板保持全亮**。
+    //    ★ 为什么放在菜单之前（别挪到后面去）：亮度调到 0 时菜单还得看得见，
+    //      否则用户没法把亮度调回来。
+    //  ★ `bri_lv = 15`（上电默认）⇒ 系数 16 ⇒ `(c×16)>>4 = c` **逐位原样**
+    //    ⇒ 不动菜单里这一项时，输出和改这一版之前**逐位相同**（仿真穷举过：
+    //    `sim\tb_bri_scale.v`，17 档 × 65536 色，bad=0）。
+    // ============================================================
+    wire [15:0] px_b;
+    bri_scale u_bri (
+        .bri_lv (menu_bri),
+        .px_in  (px_z),
+        .px_out (px_b)
+    );
+
     wire [15:0] px_m;
     wire        de_m, vs_m;
 
@@ -349,9 +531,15 @@ module disp_top #(
         .clk_pix(clk_pix), .rst_pix_n(rst_pix_n),
         .de_in(de_z), .vs_in(vs_z),
         .x_in(mx2), .y_in(my2),
-        .px_in(px_z),
+        .px_in(px_b),
         .px_out(px_m), .de_out(de_m), .vs_out(vs_m),
-        .menu_on(menu_on), .menu_sel(menu_sel)
+        .menu_on(menu_on), .menu_sel(menu_sel),
+        // ★★★ 2026-10-15【参数菜单·第2步】把两个活值送进菜单层去查字模（纯接线、只读）
+        .zoom_lv(menu_zoom_lv), .sel_aud(menu_sel_aud),
+        // ★★★ 2026-10-17【音量/亮度进菜单】行 2 的音量、行 3 的亮度
+        .vol_lv(menu_vol),
+        .bri_lv(menu_bri)
+        // ★★★ 2026-10-20【D1 · A2 删 VISUAL 行】：`.viz_on` 端口已从 menu_ovl 删除
     );
 
     // ============================================================

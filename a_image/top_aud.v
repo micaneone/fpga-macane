@@ -76,6 +76,7 @@ module top_aud #(
     //  二、命令（给 C 轨）
     // ==================================================================
     input  wire        play_sfx,        // 单拍脉冲：开始播
+    input  wire        stop_sfx,        // ★★★ 2026-10-17【修 · 换音频失真】单拍脉冲：立刻停（直通 sfx_ctrl）
     input  wire  [3:0] sfx_id,          // 第几条（0 ~ SFX_NUM-1，越界忽略）
     input  wire  [7:0] volume,          // 音量（用高 4 位当 0..15 档）
     output wire        busy,            // 1 = 还在读/放
@@ -123,13 +124,19 @@ module top_aud #(
     output wire [20:0] dbg_sfx_base,    // 这一次播哪一条（它的基址）
     output wire [20:0] dbg_sfx_words,   // 这一条多少个字
     output wire        dbg_play_tgl,    // 播放命令的 toggle（ILA 上看翻转）
-    output wire [31:0] dbg_aud_dout,    // 音频数据流（音频域）
     output wire        dbg_aud_vld,
+    // ★★★ 2026-10-17【音频可视化（队友 viz_top）要用】把这两个内部握手引出来：
+    //   ud_dout = 当前那个音频字，ud_next = 消费端取走那一拍。
+    //   ★ 只读、不参与任何握手（viz 只旁听）。删过一次，现在为可视化加回来。
+    output wire [31:0] dbg_aud_dout,
+    output wire        dbg_aud_next,
     output wire        dbg_blk_stall,   // ★ 块级读看门狗掐断过（sticky）
     output wire [15:0] dbg_aud_cnt,     // ★★ 第 8 条：音频数据自检（本次播放收了多少字）
-    output wire [31:0] dbg_aud_sum,     // ★★ 第 8 条：音频数据自检（这些字的 32 位和）
-    // ★★★ 2026-10-09：块级 FIFO 被饿穿过（sticky）—— 判"沙沙声是不是读没跟上"
-    output wire        dbg_aud_underrun
+    output wire [31:0] dbg_aud_sum      // ★★ 第 8 条：音频数据自检（这些字的 32 位和）
+    // ★★★ 2026-10-17【资源分配优化】：`dbg_aud_underrun` 端口已删
+    //   （随 aud_blk_rd.o_underrun 一起；那个旧探针在 show-ahead 协议下永不成立，
+    //    判据见 a_image\aud_blk_rd.v 端口表那段）。真判据 = `dbg_blk_stall`
+    //    （块级仲裁器 sticky，端口一字未动），顶层走字段 12 bit1。
 );
 
     // ============================================================
@@ -145,7 +152,7 @@ module top_aud #(
     wire [31:0] aud_dout;
     wire        aud_vld;
     wire        aud_next;
-    wire        aud_underrun_w;      // ★★ 2026-10-09：块级 FIFO 饿死探针（sticky）
+    // ★★★ 2026-10-17【资源分配优化】：`aud_underrun_w`（旧饿穿探针的内部网线）已删
 
     // ---- 内部 ----
     wire        aud_busy;
@@ -155,10 +162,11 @@ module top_aud #(
     assign dbg_sfx_base  = sfx_base;
     assign dbg_sfx_words = sfx_words;
     assign dbg_play_tgl  = play_tgl;
-    assign dbg_aud_dout  = aud_dout;
       assign o_audio_valid = audio_valid;
     assign dbg_aud_vld   = aud_vld;
-    assign dbg_aud_underrun = aud_underrun_w;
+    assign dbg_aud_dout  = aud_dout;
+    assign dbg_aud_next  = aud_next;
+    // ★★★ 2026-10-17【资源分配优化】：`assign dbg_aud_underrun = aud_underrun_w;` 已删
 
     // ============================================================
     //  ① sfx_ctrl —— 第几条 → 基址 / 字数
@@ -172,6 +180,7 @@ module top_aud #(
         .clk_ctl    (clk_ctl),
         .rst_ctl_n  (rst_ctl_n),
         .play_sfx   (play_sfx),
+        .stop_sfx   (stop_sfx),        // ★ 立刻停（换音频用）
         .words_act  (aud_words_act),   // ★ 实际字数（0 时 sfx_ctrl 退回 SFX_STRIDE）
         .sfx_id     (sfx_id),
         .volume     (volume),
@@ -258,8 +267,8 @@ module top_aud #(
         .dbg_cnt       (dbg_aud_cnt),
         .dbg_sum       (dbg_aud_sum),
         .dbg_blk_cnt   (),
-        .o_stall       (dbg_blk_stall),
-        .o_underrun    (aud_underrun_w)      // ★★ 饿死探针
+        .o_stall       (dbg_blk_stall)
+        // ★★★ 2026-10-17【资源分配优化】：`.o_underrun(aud_underrun_w)` 这一行已删
     );
 
     // ============================================================
@@ -286,6 +295,9 @@ module top_aud #(
         .aud_dout      (aud_dout),
         .aud_vld       (aud_vld),
         .aud_next      (aud_next),
+        // ★★★ 2026-10-17【治"放完那一声爆音"】：run 落了 = 这一轮数据全发完了
+        //   ⇒ 收尾不再"保持最后一个采样"成直流，改成指数衰减到 0。
+        .data_done     (~aud_busy),
 
         .busy          ()
     );

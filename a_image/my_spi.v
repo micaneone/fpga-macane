@@ -14,10 +14,18 @@ module my_spi #(
     input                       spi_miso,
     output reg                  spi_clk,
     output reg                  spi_cs,
-    output reg                  spi_mosi
+    output reg                  spi_mosi,
+    // ★★★ 2026-10-17【CMD18 多块读用】：0 = **冻结 SCLK**（CS 还举着，但不再给卡发时钟）。
+    //   为什么需要：多块连续读时，两块之间要把时钟停住等调用方来要下一块 ——
+    //   SD 卡在 SPI 模式下"没时钟就不动"，所以停时钟既不会丢数据、也不会让卡超时。
+    //   ★ 置 0 时同时冻结 `div_cnt`/`cnt`（相位于是不漂），`spi_clk` 保持低电平。
+    input                       spi_clk_en
 );
 reg  [15:0] div_cnt;
-wire        cnt_inc = (div_cnt == sck_div);
+// ★ 2026-10-17：把"时钟使能"并进 cnt_inc —— 冻结时 div_cnt 停在原地、cnt 也不走，
+//   于是 SCLK 相位不漂、恢复时从同一相位继续（`spi_clk_en` 默认 1，sd_init 那条不受影响）。
+wire        ce      = spi_clk_en || spi_init_start;
+wire        cnt_inc = (div_cnt == sck_div) && ce;
 reg [$clog2(data_width):0] bit_cnt_send;
 reg [1:0] cnt;
 reg spi_end_require;
@@ -26,7 +34,12 @@ always @(posedge sys_clk or negedge sys_rst_n) begin
     if (!sys_rst_n)
         div_cnt <= 16'd0;
     else if (!spi_cs||spi_init_start) begin
-        if (cnt_inc)
+        // ★★★ 2026-10-17【时钟冻结时必须清零这个计数器】
+        //   漏掉 `!ce` 这一支的后果（仿真抓到，实测 1.31 ms 的停顿就是它）：
+        //   冻结期间 `cnt_inc` 恒 0 ⇒ 走 else 把 `div_cnt` 一路加下去；
+        //   恢复时它得从当前值**绕满 16 位**（65536 拍 = 1.31 ms @50 MHz）才能再等于
+        //   `sck_div`(0) ⇒ 每次从流式等待恢复都要白等 1.3 ms，比省下的 120 µs 还贵。
+        if (cnt_inc || !ce)
             div_cnt <= 16'd0;
         else
             div_cnt <= div_cnt + 1'b1;
@@ -117,7 +130,8 @@ end
 always @(posedge sys_clk or negedge sys_rst_n) begin
     if (!sys_rst_n)
         spi_clk <= 1'b0;
-    else if (!spi_cs || spi_init_start)
+    // ★ 2026-10-17：只在"CS 低且允许走时钟"时才输出时钟（冻结时保持低电平）。
+    else if ((!spi_cs && spi_clk_en) || spi_init_start)
         spi_clk <= cnt[1];    
     else
         spi_clk <= 1'b0;

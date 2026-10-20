@@ -30,6 +30,14 @@
 //      LED：led0 两个 PLL 都锁 / led1 SD 就绪 / led2 装载完成过 / led3 A 报错
 //      数码管：显示 A 的 dbg_wr_cnt（和串口的 W 一样）—— M0 时数码管不亮，
 //              所以**以串口为准**，数码管只当参考
+//
+//  ★★★ 2026-10-17【资源分配优化】串口字段现状（33 格，帧格式/字段数未变）：
+//      保留：19/20 = 字幕指纹（C003 / 0951）、27 = sel_aud、28 = 音频+字幕状态位图、
+//            29 = rd_defer_max、30 = 读通路 sticky 位图、31/32 = 音频字数/和的低 16、
+//            12 bit1 = 块级读被掐断/饿穿过（**饿穿的真判据**）
+//      恒 0：21/22/25（原"字幕 RAM 逐字倒出"探针，已连产生逻辑一起删）
+//            26（原音频 FIFO 饿穿探针，show-ahead 协议下永不成立，已删）
+//            30 的 bit10 同上（位序未变，这一位不再置起）
 // ============================================================
 
 // ★ 打开 = 显示参数来自 A 的描述符（完整版 M1）；注释掉 = 写死大槽 0 + 下面那两个尺寸
@@ -37,15 +45,16 @@
 //      写死的话换成 800x600 的图行距就对不上了（花屏）。
 `define USE_DESC
 
-// ★★ 打开 = 先显示 B 自己的【自测图】（不需要 SD 卡、不需要 A）
-//    上电后 B 直接往大槽 0 写一张"8 条竖色条 + 顶白条 + 左边行标记"的图，
-//    屏上应当立刻出现这张图；这时【按 key1】才会让 A 去装载真图。
-//    作用：把"A 的数据错"和"B 的读取错"一次分开 ——
-//      自测图正常 → B 的读取链没问题，问题在 A 那边（BMP 格式/解码）
-//      自测图也花 → 问题在 B 的读取链（或存储），和 A 无关
-//    ★ 排完就把这行注释掉，恢复"上电自动装第一张"。
-`define B_SELFTEST
-
+// ★★★ 2026-10-17【修 bug ⑤】删掉死宏 `define B_SELFTEST`
+// ------------------------------------------------------------
+//  它曾经控制"上电先显示 B 自己的自测图"。**现在整个工程里没有任何
+//  `ifdef B_SELFTEST`**（grep 过全树：只有这一行的定义）⇒ 它开/关都不产生
+//  任何逻辑，但文件头却写着"打开 = 先显示自测图" ⇒ 属于会误导人的死开关。
+//  自测图的真正替代品是 `rtl\stub_a_writer.v` + `RENDER_SELFTEST`，
+//  要查"是 A 的数据错还是 B 的读取错"请用那一条路（见 交接文档）。
+//  ★ 同理，本文件头 12~32 行那段"今晚上板两遍 / 0.5 秒一行 W= S= F= / 数码管"
+//    全是 M0/M1 时代的话，与现在的 33 字段 200 ms 帧格式不符；
+//    串口字段的**权威说明**在 33~41 行那张表 + `rtl\dbg_report.v` 文件头。
 `timescale 1ns / 1ps
 
 module top_m2 #(
@@ -141,6 +150,18 @@ module top_m2 #(
     wire [15:0] rgb565_w;
     wire        de_w, vs_w;
     wire [11:0] dbg_x, dbg_y;
+
+    // ★★★ 2026-10-16【清理冗余 viz + 修 top_a 多重驱动】：
+    //   这里原来声明了 8 根**只服务队友那套 viz_top 的悬空网线**：
+    //     viz_hist_mask/band/color、viz_freq_mask/band/color、viz_dbg_freq_win/dump。
+    //   ★ 它们**从来没有驱动源**（只是一个占位声明 + 往 disp_top 的输入端口上送），
+    //     而队友那套 viz 已从 disp_top 里摘除（装不下：mslice 5564 > 硬墙 4900）
+    //     ⇒ 这 8 根连声明一起删。
+    // ★★★ 2026-10-17【音频可视化整层砍除】：原来这句还写着"保留 viz_bars 走的
+    //   aud_dbg_vld/dout/next 三根"。现在自研那套 viz_bars 也砍了 ⇒
+    //   **aud_dbg_dout / aud_dbg_next 两个端口和网线一起删**（只留 aud_dbg_vld，
+    //   它是串口字段 28 bit3 的"有音频数据流"判据，跟可视化无关）。
+    //   ★ 备份与还原：`E:\FPGA\ygcom\.viz_backup_20261017\`。
 
     // ============================================================
     //  ★★★ 2026-10-03 第二版（上板才知道的）★★★
@@ -287,11 +308,18 @@ module top_m2 #(
     wire [19:0] hdmi_acr_cts, hdmi_acr_n;
     // 音频诊断（先接线网 / 进串口，见字段 28）
     wire [20:0] aud_dbg_base, aud_dbg_words;
-    wire [31:0] aud_dbg_dout;
     wire        aud_dbg_vld, aud_dbg_play_tgl;
+    // ★ 2026-10-17【音频可视化】：viz 只旁听的另外两根（top_aud 已重新引出）
+    wire [31:0] aud_dbg_dout;
+    wire        aud_dbg_next;
     wire [15:0] aud_dbg_cnt;            // ★★ 第 8 条：音频数据自检（字数）
     wire [31:0] aud_dbg_sum;            // ★★ 第 8 条：音频数据自检（32 位和）
-    wire        aud_dbg_underrun;       // ★★ 2026-10-09：块级 FIFO 饿死过（sticky）
+    // ★★★ 2026-10-17【资源分配优化】：原 `aud_dbg_underrun`（2026-10-09 块级 FIFO 饿死
+    //   探针）随 `aud_blk_rd.o_underrun` / `top_aud.dbg_aud_underrun` 一起删除。
+    //   ★ 它原来进两处：串口**字段 26**（现改送常量 0，帧格式/字段数一字未动）与
+    //     `dbg_chain[10]`（见下面那段，位序不变，该位现在恒 0）。
+    //   ★ 真判据仍在，一个字没删：`aud_blk_stall`（= blk_rd_arb 的块级掐断 sticky）
+    //     走 **字段 12 的 bit1** 与 **字段 30 的 bit10**。
     // ---- ★★★ 2026-10-06 音频的块级读口（top_aud ↔ blk_rd_arb 的音频口）----
     wire        aud_a_req;              // top_aud → 闸门
     wire        aud_a_req_g;            // 闸门后 → blk_rd_arb.a_req
@@ -308,6 +336,17 @@ module top_m2 #(
     reg         aud_fail;             // 音效装载失败过（不再重试）
     reg         aud_load_pulse;       // → A 的 start
     reg         aud_play_req;         // → sfx_ctrl 的 play_sfx（一拍）
+    // ★★★ 2026-10-17【修 · 换音频失真】→ sfx_ctrl 的 stop_sfx（一拍）：换音频前先把上一首停掉。
+    //   不加这一根的话会有一个竞态：`sfx_ctrl` 是"播放中（busy）就丢掉新 play 命令"，
+    //   而 busy 要等整首词发完才落、装载期间音频读又被掐断 ⇒ 装载完那一拍 play 被丢，
+    //   旧指针（旧 base/旧字数）继续读**已被覆写**的音效区 ⇒ 听感就是"失真/串味"。
+    reg         aud_stop_req;
+    // ★★★ 2026-10-17【修 lint · 消除 HDL-7225】：`aud_words_act` 原来声明在音频状态机那段
+    //   （第 2173 行附近），但它的**首次使用**是更上面的 `u_aud` 端口连接（现在 2082 行附近）
+    //   ⇒ TD 报 `CRITICAL-WARNING: 'aud_words_act' is already implicitly declared`
+    //   （隐式声明是 1 位网线；TD 这次把它并到了显式 reg 上，播放长度的夹取实测是对的，
+    //    但这属于"能编译、语义靠工具兜底"的隐患）⇒ **声明挪到所有使用之前**。
+    reg  [20:0] aud_words_act;        // 本次装入音效的【实际字数】（a_wav_done 时刻 latch a_wr_len）
     reg  [1:0]  aud_st;               // 0=等图 1=等 1 秒 2=装载中 3=做完
     reg  [25:0] aud_wait;
 
@@ -416,7 +455,7 @@ module top_m2 #(
     //    ★ 顶层端口 ↔ 板上丝印（照《HX4S20 开发板手册》）：KEY1=A2  KEY2=B2  KEY3=B1  KEY4=C1，
     //      其中 **A2 已经被硬复位 `rst_n` 占用** ⇒ 本工程端口 `key1/key2/key3`
     //      实际是板上 **KEY2(B2) / KEY4(C1) / KEY3(B1)**（见上面端口表 + 下面 u_ctrl 的接法）。
-    //    ★ 和 KEY3 彻底解耦：按 KEY3 只会换图，**不再顺带换音频**（`k1_press_w` 只进 stub_ctrl）。
+    //    ★ 和音频选择彻底解耦：换图按键（2026-10-17 起是 KEY2）只驱动 stub_ctrl，**不再顺带换音频**。
     //
     //  选择寄存器 `sel_aud`：按 `SFX_NUM`（=2）取模循环，**SW3 每拨一次 +1**。
     //    ★ 位宽由 `SFX_NUM` 决定（2 条 ⇒ 1 位），改条数时只改上方的 localparam 即可。
@@ -431,6 +470,11 @@ module top_m2 #(
     //     装图仍走 `a_skip`（`sd_mode==0` 那一档，由控制桩/key3 管，也一个字没动）。
     //   ★ `find_bmp` 在 start 那一拍锁存 skip（`a_image\find_bmp.v` 第 175 行 `skip_r <= skip;`）
     //     ⇒ 就算 sel_aud 在别处变了，也绝不会把"正在跑的这一趟"带偏。
+    // ★ 2026-10-17【修 lint · 消除 HDL-5373】_skip 原来声明在第 620 行，而下面这句就用它 ⇒ 挪上来。
+    // ★ 2026-10-17【修 lint · 消除 HDL-5373】`a_skip` 原来声明在下面几百行处，
+    //   而下一句 `a_sd_skip` 就用它 ⇒ **声明挪到所有使用之前**。`a_skip` 是 4 位网线，
+    //   隐式声明只会有 1 位 ⇒ 属于"能编译但语义靠工具兜底"的隐患。
+    wire [3:0]  a_skip;
     wire [3:0]  a_sd_skip  = sub_load_pulse ? SUB_SKIP :
                              (a_sd_mode == 2'd1 ? {{4-SEL_AUD_W{1'b0}}, sel_aud} : a_skip);
 
@@ -560,37 +604,17 @@ module top_m2 #(
     //        免得按一下就悄悄把自测地址图覆盖掉。
     //      key2 仍然照旧（控制桩里的软复位）。
     // ============================================================
-    wire key1_press;
-    key_press_debounce #(.CLK_FREQ_HZ(50_000_000), .DEBOUNCE_MS(20)) u_k1 (
-        .clk(clk), .rst(~rst_n), .button_in(key1), .press_pulse(key1_press)
-    );
-
-    reg [2:0] zoom_lv;      // ★ M2：KEY1 循环的缩放档（0=适配 1=1x 2=1.5x 3=2x 4=3x 5=4x）
-    reg [3:0] key_cnt;
-    // ★ 这个旋钮用【引脚复位】而不是 sys_rst_n：这样 key2 软复位重来之后，
-    //   调好的补偿值还留着，不用重新按。
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            // ★★★ 2026-09-28 第五轮【本质变了】：读口那两条脾气
-            //   （起点必须 4 字对齐 / 每趟第 1 个字会丢）现在由
-            //   `b_display\line_buf.v` 统一抵消（请求提前 4 个字 + 丢掉第 1 个
-            //   收到的字），所以【这个旋钮必须回到 0】——它现在只是一把
-            //   "故意把起点挪歪"的实验工具：
-            //     0 = 正常（默认，行首原样送，靠 line_buf 抵消）
-            //     1..7 = 手动把行首再往前挪几个字；只要不是 4 的整数倍，
-            //            核的 4 字分组就会错开 → 屏上立刻出现"等距小条"。
-            //   也就是说：以后看到那种条纹，先看这个数是不是 0。
-            //   （旋钮：按 key1 循环 0→1→…→7）
-            zoom_lv <= 3'd0;
-            key_cnt <= 4'd0;
-        end
-        else if (key1_press) begin
-            // ★ M2：KEY1 = 【循环缩放档】0=适配 1=1x 2=1.5x 3=2x 4=3x 5=4x → 回 0
-            if (zoom_lv == 3'd5) zoom_lv <= 3'd0;
-            else                 zoom_lv <= zoom_lv + 3'd1;
-            key_cnt <= key_cnt + 4'd1;
-        end
-    end
+    reg [2:0] zoom_lv;      // 缩放档（0=适配 1=1x 2=1.5x 3=2x 4=3x 5=4x）
+    reg [3:0] vol_lv;       // ★★★ 2026-10-17【音量进菜单】：音量档 0..15（15 = 满，= 原来写死的 8'hFF）
+    reg [3:0] bri_lv;       // ★★★ 2026-10-17【亮度进菜单】：亮度档 0..15（15 = 原样/不压暗，0 = 最暗）
+    reg [3:0] key_cnt;      // KEY2（菜单"确定"）按了几次 —— 串口字段 18
+    // ★★★ 2026-10-17【缩放改到菜单里】
+    //   原来这里有一个 KEY2 的消抖实例 `u_k1` + 一段"每按一次 KEY2 就循环 zoom_lv"的
+    //   always。现在缩放**只能在菜单里改**（菜单打开 + 光标在 ZOOM 行 + 按 KEY2），
+    //   所以那一半整段删除，新的驱动逻辑放在下面菜单块之后（那里才用得到 menu_on/menu_sel）。
+    //   ★ 同一根引脚 `key1` 上原来有**两个**消抖实例（`u_k1` 吃引脚复位、`u_k1_ok` 吃
+    //     sys_rst_n）—— 现在只保留 `u_k1_ok`（菜单那条）⇒ 顺手省掉一个消抖器。
+    //   ★ zoom_lv 仍用**引脚复位** rst_n：软复位（KEY4）重来后缩放档保留。
 
     // 档位同步到像素域（只按 KEY1 时才变，慢变；两位同步器够用，
     // 跨域瞬间最多错一帧，肉眼看不出来）
@@ -606,8 +630,7 @@ module top_m2 #(
     //       （它内部再自己门控出 ctl_rst_n，见 stub_ctrl.v 文件头）
     // ============================================================
     wire        a_start, soft_rst;
-    wire [3:0]  a_skip;
-    wire [2:0]  a_use_slot;
+        wire [2:0]  a_use_slot;
     wire [20:0] a_slot_base;
     wire [7:0]  a_img_no;
     wire        a_busy, a_load_done, a_desc_done, a_fail, a_sd_ready;
@@ -704,13 +727,20 @@ module top_m2 #(
     //                             ★ 方向极性仍然是**一行 localparam**（`MENU_UP_ON_1`），
     //                               上板若发现上下反了，改那一个 bit 即可。
     //    · **KEY3（引脚 B1）**  ：**菜单打开时 = 步进按钮**（每按一次 ±1、4 项回绕）；
-    //                             菜单关闭时 = **照旧"装载 / 换下一张"**（老路径一位没动）。
+    //                             ★★★ 2026-10-17【用户改稿·已上板】菜单**关闭**时 =
+    //                             **自动轮播的开/关翻转**（不再是"装载/换下一张"，那个
+    //                             功能已交给 KEY2）。开着就每 ~3 s 自动换一张。
     //                             ★ 消抖用的是**本块自己新加的**官方 `key_press_debounce`
     //                               实例 `u_k3_menu`（和 `stub_ctrl` 里那个同款、同参数）——
     //                               用户明确要求本步**不牵扯 `stub_ctrl` 内部**，所以宁可
     //                               多一个实例，也不去复用它内部的 `k1_press`。
-    //    · **KEY2（引脚 B2，本工程端口 `key1`）**：菜单的"确定/决定" —— 本步仍**不接参数**，
-    //                             只保留已有的 `u_k1_ok` 实例与连线（`key1_ok_press` 悬空）。
+    //    · **KEY2（引脚 B2，本工程端口 `key1`）**：两个身份 ⇒
+    //                             ① 菜单**打开**时 = "确认"键（进/出调节态，
+    //                                见下面 `menu_edit`，行 0 = ZOOM、行 2 = VOLUME）；
+    //                             ② 菜单**关闭**时 = **换下一张图**（走 `stub_ctrl` 的
+    //                                `key1` 口，被 `key1 | menu_on` 门控）。
+    //        ★ 2026-10-17 修正：这里原来写"本步仍不接参数、`key1_ok_press` 悬空"，
+    //          早就不是了 —— `key1_ok_press` 现在驱动 `menu_edit`（确认）和 `key_cnt`。
     //    · **KEY4（引脚 C1，端口 `key2`）**：**一字不动**（照旧软复位）。
     //                             ★ 本步**不做任何复位门控**（用户明确要求）——
     //                               `sys_rst_n` 那一行不碰、`stub_ctrl` 内部不碰。
@@ -718,7 +748,8 @@ module top_m2 #(
     //                             ★ 所以本菜单块**不消费** `sw3_change`。
     //    · **SW4（引脚 C5）**   ：**一字不动**（照旧"字幕水平滚动"）。
     // ------------------------------------------------------------
-    //  ★ 菜单状态：菜单固定 **4 项** ⇒ `menu_sel` 2 位。
+    //  ★ 菜单状态：★ 2026-10-18 起菜单 **5 项**（ZOOM / AUDIO / VOLUME / BRIGHT / VISUAL）
+    //    ⇒ `menu_sel` 3 位（`MENU_W=3`），`menu_ovl.ROW_N` 必须同为 5。
     //  ★ 菜单关闭（`menu_on = 0`）时既有行为**逐位不变**，逐条论证：
     //      · `menu_on` 被复位成 0、且只有拨 SW2 才翻转 ⇒ 上电行为与改前逐拍一致；
     //      · 本块进入既有逻辑的东西只有两处，且**在 `menu_on = 0` 时都退化成原式**：
@@ -737,8 +768,8 @@ module top_m2 #(
     //     和 `stub_ctrl` 内部那个（吃引脚 `rst_n`）不同 —— 这里跟软复位一起清：软复位后
     //     菜单本来就该回到干净状态，且这样不会在软复位瞬间漏出一个假脉冲。
     // ============================================================
-    localparam integer MENU_N = 4;                  // 菜单项数（固定 4）★ menu_ovl 的 ROW_N 必须一样
-    localparam integer MENU_W = 2;                  // 光标位宽（4 项 ⇒ 2 位）；改条数时这里也要改
+    localparam integer MENU_N = 4;                  // 菜单项数（★ 2026-10-20【D1·A2】：5→4，删掉行 4 VISUAL）★ menu_ovl 的 ROW_N 必须一样
+    localparam integer MENU_W = 3;                  // 光标位宽（5 项 ⇒ 3 位）；改条数时这里也要改
     // ★★★ 2026-10-15【参数菜单·操作方式修订】光标方向极性 —— **整个设计只此一行**
     //   = 1：SW1 电平为 1 ⇒ `menu_dir = 1`（下一次按 KEY3 光标 **+1**，往上走）
     //   = 0：SW1 电平为 1 ⇒ `menu_dir = 0`（下一次按 KEY3 光标 **−1**，往下走）
@@ -750,8 +781,10 @@ module top_m2 #(
     wire       menu_dir;                            // ★ 方向状态位：1 = 上 / 0 = 下（只读电平）
     wire       key3_step_press;                     // ★ KEY3(B1)：菜单"步进"单拍脉冲（本块新实例）
     reg        menu_on;                             // ★ 菜单开关（0 = 关，上电即 0）
+    reg        menu_edit;                           // ★ 调节态：1 = 正在调 ZOOM 值（KEY2 进/出，SW1/KEY3 步进）
     reg  [MENU_W-1:0] menu_sel;                     // 光标（0..MENU_N-1）
     wire       key1_ok_press;                       // KEY2(B2)/端口 key1：菜单"确定"脉冲（本步仍悬空）
+
 
     // ---- SW2（C7）：消除抖动（20 ms）⇒ 每次拨动给一拍 ⇒ 翻转菜单开关 ----
     sw_edge_debounce #(.CLK_FREQ_HZ(50_000_000), .DEBOUNCE_MS(20)) u_sw2 (
@@ -789,15 +822,38 @@ module top_m2 #(
             sw1_lvl1 <= 1'b0;  sw1_lvl2 <= 1'b0;
             menu_on  <= 1'b0;                         // ★ 菜单默认**关**（上电与改前一致）
             menu_sel <= {MENU_W{1'b0}};
+            menu_edit <= 1'b0;                        // ★ 调节态默认关
         end
         else begin
             // ---- ★【操作方式修订】SW1 只做**两级同步**：它是"方向状态位"，不是脉冲 ----
             sw1_lvl1 <= sw1;  sw1_lvl2 <= sw1_lvl1;
             // ---- SW2：每拨一次 ⇒ 菜单开/关翻转（消抖模块已滤抖动，不会因弹跳多翻）----
             if (sw2_change) menu_on <= ~menu_on;
-            // ---- ★【操作方式修订】KEY3：**菜单打开时**才当步进按钮（关着时它去换图）----
-            //    方向取**当前** SW1 状态位（`menu_dir`）⇒ 先拨 SW1 再按 KEY3，方向跟着变。
-            if (menu_on && key3_step_press) begin
+            // ============================================================
+            //  ★★★ 2026-10-17【菜单·调节态】用户改稿：
+            //    · **KEY2 = 确认键**：光标停在 ZOOM 行时，按 KEY2 进入 / 退出**调节态**；
+            //    · **调节态里 SW1 决定档位上下**：拨 SW1（消抖后的变化脉冲）⇒ `zoom_lv` ±1
+            //      （拨到"上"那侧 = +1，另一侧 = −1，两端回绕 0↔5）；
+            //    · 调节态里 KEY3 也按 SW1 方向步进（和光标同样的手感，两者都支持）；
+            //    · **非调节态**时 KEY3 仍然是"按 SW1 方向移光标"。
+            //    ★ 退出条件（三选一）：菜单关掉、光标被移走、或再按一次 KEY2。
+            //    ★ 为什么用 SW1 的**变化脉冲**而不是电平：SW1 是两档拨动开关，
+            //      "拨一下"就是一次操作；电平当操作会每拍 +1（不可能）。
+            //      方向和脉冲对得上：消抖器要 20 ms 稳定才给脉冲，那时 `sw1_lvl2`
+            //      早已是新电平 ⇒ 直接用 `menu_dir` 就是"拨过去之后"的方向。
+            // ============================================================
+            // ★★★ 2026-10-17【亮度进菜单】：可调行 = 0（ZOOM）/ 2（VOLUME）/ **3（BRIGHT）**。
+            //   行 1（AUDIO）只显示、不可调（音频条由 SW3 换），所以这里要精确列出可调行。
+            // ★★★ 2026-10-18【可视化开关进菜单】：可调行 = 0（ZOOM）/ 2（VOLUME）/
+            //   **3（BRIGHT）** / **4（VISUAL，ON↔OFF 翻转）**；行 1（AUDIO）只显示不可调。
+            if (!menu_on || ((menu_sel != 3'd0) && (menu_sel != 3'd2) &&
+                             (menu_sel != 3'd3)))
+                menu_edit <= 1'b0;                    // 菜单关 / 光标在不可调行（只有行 1）⇒ 自动退出调节
+            else if (key1_ok_press)
+                menu_edit <= ~menu_edit;              // KEY2 = 确认（进/出调节态）
+
+            // ---- KEY3：调节态里不移动光标（让位给档位步进）----
+            if (menu_on && !menu_edit && key3_step_press) begin
                 if (menu_dir) begin
                     // 上移：3 ⇒ 0，否则 +1
                     if (menu_sel == (MENU_N - 1)) menu_sel <= {MENU_W{1'b0}};
@@ -892,11 +948,184 @@ module top_m2 #(
 
     wire        req_tgl;                // 控制桩翻一次 = 请求换下一张
     wire [1:0]  fx_sel_ctl;             // 控制桩选的淡入特效
-    wire        k1_press_w;             // ★ 探针：`stub_ctrl` 内部消抖后的 KEY3 脉冲
-                                        //   ★★★ 2026-10-15【操作方式修订】：它现在是"**过了
-                                        //   菜单门控之后**"的脉冲（输入 = `key3 | menu_on`）
-                                        //   ⇒ 菜单打开期间不计数；仅影响串口字段 6 的观测量。
+    wire        k1_press_w;             // ★ 探针：`stub_ctrl` 内部消抖后的**换图按键**脉冲
+                                        //   ★★★ 2026-10-17：这根输入现在是 **KEY2（B2/端口 key1）**
+                                        //   （原来接的是 KEY3）⇒ 它统计的是"手动换下一张"的次数，
+                                        //   轮播自己的请求**不**计入（轮播看字段 22）。
+                                        //   ★ 2026-10-15【操作方式修订】：它仍是"**过了菜单门控之后**"
+                                        //   的脉冲（输入 = `key1 | menu_on`）⇒ 菜单打开期间不计数。
     wire        req_pend_w;             // ★ 探针：转场请求挂起中
+
+    // ============================================================
+    //  ★★★ 2026-10-17【KEY3 改自动轮播】—— 用户改稿
+    // ------------------------------------------------------------
+    //  旧：KEY3（B1）按一次 = 换下一张图（手动）。
+    //  新：**菜单关着时**，KEY3 每按一次 = 轮播开/关翻转；开着就每 ~3 秒自动换一张。
+    //      菜单**打开**时 KEY3 仍是"移光标"（和以前一样，缩放要在菜单里改）。
+    //  ★ 换图本身还是走 `stub_ctrl` 的老路（转场 → 米白 → 装载 → 淡入），
+    //    只是把"按键脉冲"换成"轮播请求脉冲"（`u_ctrl` 新增的 `adv_req` 口），
+    //    `stub_ctrl` 内部除受理判据那一处或门外**一个字没动**。
+    //  ★ 轮播脉冲只在**空闲窗口**里给（不等转场、不撞装载、不抢挂起请求）：
+    //    判据 = `!(a_busy | ac2 | req_pend_w)`，所以不会把一次换图挤掉。
+    // ============================================================
+    localparam integer CARO_MS = 3000;                       // 轮播间隔（ms）
+    // ★ 位宽注意：3000 ms × 50 MHz = **150,000,000** ⇒ 至少要 28 位。
+    //   一开始写成 [17:0] 被截断成 ~5 ms，实测表现是"每几百毫秒换一张"，
+    //   把转场/装载打崩、`fail_latch` 置位（一次上板就抓到了）。
+    localparam [27:0]  CARO_TICKS = CARO_MS * 50_000;        // 50 MHz ⇒ 150,000,000
+    reg  [27:0] caro_cnt;
+    // ★★★ 2026-10-20【D1 · A3】：上电默认 = **1'b1（自动轮播）**。
+    //   为什么改：商显/应急场景是**无人值守**上台 —— 原来 1'b0 要求现场有人按一次
+    //   KEY3 才开始轮播，评委/路人不按，屏上就永远停在第一张（2026-10-19 评审列为
+    //   "场景级致命"）。改成 1 之后：上电 → 装完首图 + 字幕 + 音频 → 3 s 后自动换下一张。
+    //   ★ 现场仍可用 KEY3 手动暂停（电平语义没变），`caro_idle` 那两道闸门也没动。
+    localparam CARO_ON_AT_BOOT = 1'b1;
+    reg         auto_caro;                                   // 轮播开关
+    wire        caro_tick = (caro_cnt >= (CARO_TICKS - 28'd1));
+    // ★★★ 空闲闸门（两道）：
+    //   ① `!(a_busy | ac2 | req_pend_w)`：不撞装载、不撞转场、不抢挂起请求。
+    //   ② `(sub_loaded | sub_fail)`：**开机那趟音频/字幕装载做完之前不许轮播**。
+    //      这一条是上板试出来的：轮播从开机就跑的话，第一次换图会和"装字幕/装音频"
+    //      那一次 start 撞在一起（A 只有一个 start 口）⇒ 字幕 fail
+    //      （实测 field28 变成 6763：字幕 loaded=0/fail=1）。
+    //      默认（`CARO_ON_AT_BOOT=0`）本来就不会开机轮播，这一条是防止用户一起机就按 KEY3。
+    wire        caro_idle = ~(a_busy | ac2 | req_pend_w) & (sub_loaded | sub_fail);
+    wire        adv_req_w = auto_caro & caro_tick & caro_idle;
+
+    always @(posedge clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin
+            auto_caro <= CARO_ON_AT_BOOT;
+            caro_cnt  <= 28'd0;
+        end
+        else begin
+            // 菜单关着时，KEY3 = 轮播开关（低有效按键，`key3_step_press` 已是消抖后的单拍）
+            if (key3_step_press && !menu_on) auto_caro <= ~auto_caro;
+            if (!auto_caro)      caro_cnt <= 28'd0;
+            // 轮播自己发过请求、或用户手动按了 KEY2（换下一张）⇒ 都重新计时，
+            // 免得"手按完 0.2 秒又自动换一张"
+            else if (adv_req_w || (key1_ok_press && !menu_on)) caro_cnt <= 28'd0;
+            else if (!caro_tick) caro_cnt <= caro_cnt + 28'd1;
+        end
+    end
+
+    // ============================================================
+    //  ★★★ 2026-10-17【缩放改到菜单里 · 调节态】用户改稿：
+    //    菜单打开 + 光标停在 ZOOM 行（`menu_sel == 0`，见 menu_ovl 的行序）+ 按 KEY2
+    //    进入调节态（`menu_edit`），然后在调节态里：
+    //      · 拨 **SW1** ⇒ 档位按拨动方向 ±1（上=+1，两端回绕 0↔5）；
+    //      · 按 **KEY3** ⇒ 同一方向再步进一次（两套手感都支持）；
+    //      · 再按 **KEY2** = 确认，退出调节态。
+    //    ★ 面板上 ZOOM 行显示的活值就是它（menu_ovl 已经在用 `menu_zoom_lv`），
+    //      所以调的时候能直接在屏上看到档数变化。
+    //    ★ 菜单关着 / 光标不在 ZOOM 行 ⇒ 自动退出调节态（见上面那个 always）。
+    //    ★ KEY4（软复位）、SW2（菜单开关）、SW3/SW4**都没动**。
+    //
+    //  ★★★ 2026-10-17【音量也进菜单】（用户要求"把改音量的功能加入菜单"）
+    //    和 ZOOM **完全同一套手感**，只是行号不同（行 2 `VOLUME`）：
+    //      · 光标停在 VOLUME 行 + 按 KEY2 ⇒ 进/出调节态（复用同一个 `menu_edit`）；
+    //      · 调节态里按 KEY3 ⇒ 音量 ±1（方向 = `menu_dir`，和光标移动同一个方向位）；
+    //      · **拨 SW1 本身不改任何数值**（用户 2026-10-17 明确要求过，这里照同一条规矩）。
+    //    ★ 两端**夹住不绕回**（不是回绕）：音量 15 再加还是 15、0 再减还是 0 ——
+    //      避免"按到顶突然跳到静音"这种意外。
+    //    ★ 音量真的接到播放链上：`u_aud` 的 `.volume` 就是它（sfx_player 里
+    //      `vol4 = volume[7:4]`，所以 `{vol_lv, 4'hF}` ⇒ 有效档 = vol_lv，15 = 原来写死的 8'hFF）。
+    //    ★ 用**引脚复位** rst_n（和 zoom_lv 一样）：KEY4 软复位后音量保留。
+    //
+    //  ★★★ 2026-10-17【亮度也进菜单】（用户要求"做一个调节亮度的功能，类似音量"）
+    //    行 3 `BRIGHT`，和 VOLUME **完全同一套手势**（光标停 BRIGHT 行 + KEY2 进调节态
+    //    + KEY3 按方向 ±1 + KEY2 确认；SW1 只定方向、自己不改值）：
+    //      · 两端**夹住不绕回**（0..15）；
+    //      · 上电/软复位默认 15 = **原样**（数学上 `(c×16)>>4 = c` ⇒ 画面逐位不变）；
+    //      · 它接的是 `disp_top.menu_bri` → `b_display\bri_scale.v`，
+    //        压暗的是"画面 + 可视化柱 + 字幕"，**菜单面板本身不压暗**
+    //        （否则亮度调到很低就再也看不清菜单了）；
+    //      · 同样用**引脚复位** rst_n：KEY4 软复位后亮度保留。
+    //    ★ 行 3 原来是占位 `EXIT`（按 KEY2 什么也不做）⇒ 现在被 BRIGHT 顶替，
+    //      退菜单本来就是 SW2 拨一下，不需要 EXIT 这一行。
+    // ============================================================
+    //  ★★★ 2026-10-18【可视化总开关进菜单】行 4 `VISUAL`（用户要求"把可视化开关加进菜单"）
+    //    手势和其它可调行**同构**（光标移到 VISUAL 行 → KEY2 进调节态 → KEY3 改 → KEY2 确认），
+    //    但它是**布尔量**：每按一次 KEY3 就 ON↔OFF 翻转（不跟 SW1 方向 —— 只有两态，
+    //    分上下没有意义，翻转最省事、也不会"按到顶没反应"）。
+    //      · 上电/软复位默认 **1 = 显示**（= 加这个开关之前的行为，绝不影响现有观感）；
+    //      · 用**引脚复位** rst_n、和音量/亮度同一口径 ⇒ KEY4 软复位后保留；
+    //      · 接 `disp_top.menu_viz_on`：关掉时柱形和那块压暗底一起门掉，
+    //        `px_v` 逐位等于 `px_mix`（屏上一点可视化痕迹都不留）；
+    //      · 后台 viz_time / viz_freq **照样跑**（它们只旁听音频），重新打开立刻有图。
+    // ============================================================
+    wire zoom_step = menu_edit & key3_step_press & (menu_sel == 3'd0);  // ★ 档位**只由 KEY3 改**；SW1 只定方向（用户 2026-10-17 明确）
+    wire vol_step  = menu_edit & key3_step_press & (menu_sel == 3'd2);  // ★ 同上：音量也只用 KEY3 改
+    wire bri_step  = menu_edit & key3_step_press & (menu_sel == 3'd3);  // ★ 同上：亮度（行 3 BRIGHT）
+    // ★★★ 2026-10-20【D1 · A2】：行 4 `VISUAL` 删了 ⇒ 可视化没有开关了，**常开**。
+    //   留一根常量 `viz_on`（而不是把下游全改成 1'b1）：这样串口遥测的 33 字段格局、
+    //   `viz_s1/viz_s2` 两级同步、`disp_top.menu_viz_on` 端口都不动；
+    //   将来想把开关放回去，只需恢复原来那段 reg + always。
+    wire viz_on = 1'b1;                                                 // 1 = 显示 / 0 = 关闭
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            zoom_lv <= 3'd0;
+        end
+        else if (zoom_step) begin
+            // 方向 = `menu_dir`（1 = 上 = +1），两端回绕
+            if (menu_dir) zoom_lv <= (zoom_lv == 3'd5) ? 3'd0 : (zoom_lv + 3'd1);
+            else          zoom_lv <= (zoom_lv == 3'd0) ? 3'd5 : (zoom_lv - 3'd1);
+        end
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            vol_lv <= 4'd15;                       // ★ 上电 = 满档（和原来写死的 8'hFF 一模一样）
+        end
+        else if (vol_step) begin
+            // 方向 = `menu_dir`（1 = 上 = +1），两端**夹住**
+            if (menu_dir)  vol_lv <= (vol_lv == 4'd15) ? 4'd15 : (vol_lv + 4'd1);
+            else           vol_lv <= (vol_lv == 4'd0)  ? 4'd0  : (vol_lv - 4'd1);
+        end
+    end
+
+    // ★★★ 2026-10-17【亮度进菜单】：和音量同一套口径（夹住、方向 = menu_dir、引脚复位保留）
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            bri_lv <= 4'd15;                       // ★ 上电 = 原样（15 ⇒ 系数 16 ⇒ 逐位恒等）
+        end
+        else if (bri_step) begin
+            if (menu_dir)  bri_lv <= (bri_lv == 4'd15) ? 4'd15 : (bri_lv + 4'd1);
+            else           bri_lv <= (bri_lv == 4'd0)  ? 4'd0  : (bri_lv - 4'd1);
+        end
+    end
+
+    // ★ KEY2（确认键）按下次数 → 串口字段 18（原来这一格统计的是"缩放旋钮"按下次数）
+    always @(posedge clk or negedge sys_rst_n) begin
+        if (!sys_rst_n)                                key_cnt <= 4'd0;
+        else if (key1_ok_press && key_cnt != 4'hF)     key_cnt <= key_cnt + 4'd1;
+    end
+
+    // ★ 轮播请求计数（上板判读"到底有没有在换图"）→ 串口字段 22
+    reg [15:0] caro_dbg_cnt;
+    always @(posedge clk or negedge sys_rst_n) begin
+        if (!sys_rst_n)                                 caro_dbg_cnt <= 16'd0;
+        else if (adv_req_w && caro_dbg_cnt != 16'hFFFF) caro_dbg_cnt <= caro_dbg_cnt + 16'd1;
+    end
+
+    // ★★★ 2026-10-17【串口可读】：轮播/菜单/缩放的状态字 → 字段 21（本来恒 0）
+    //   位：[7]=auto_caro [6:4]=zoom_lv [3]=menu_on [2:1]=menu_sel [0]=menu_edit
+    //   ★ 帧格式/字段数不变，只是把一格常量换成真实状态 —— 上板判读"按了 KEY3 到底开没开"用。
+    // ★★★ 2026-10-17【亮度进菜单】：高 4 位本来是常量 0，现在放 `bri_lv`（0..15）——
+    //   亮度是"改了就整屏变暗"的功能，没有一格读数就只能靠肉眼看，所以借这 4 位。
+    // ★★★ 2026-10-18【可视化开关进菜单】：`menu_sel` 4→5 项变成 **3 位**，
+    //   字段 21 一共只有 16 位 ⇒ 重新排一次（位序变了，读串口的脚本要跟着改）：
+    //       [15:12] = bri_lv      （亮度 0..15）
+    //       [11:10] = 0
+    //       [9]     = viz_on      （可视化开关，1 = 显示）
+    //       [8]     = auto_caro   （轮播开/关）
+    //       [7:5]   = zoom_lv     （缩放档 0..5）
+    //       [4]     = menu_on
+    //       [3:1]   = menu_sel    （光标 0..4）
+    //       [0]     = menu_edit
+    //   ★ 判读：默认态（亮度 15 / 可视化开 / 轮播关 / 适配档 / 菜单关）读作 **`F200`**；
+    //     把亮度调到 0 读 `0200`；关掉可视化读 `F000`（bit9 落 0）。
+    wire [15:0] dbg_caro_word = {bri_lv, 2'd0, viz_on, auto_caro, zoom_lv, menu_on, menu_sel, menu_edit};
 
     // 控制域 → 像素域：req_tgl 取边沿 = 一拍请求脉冲
     reg rt1, rt2, rt3;
@@ -993,6 +1222,7 @@ module top_m2 #(
     // ============================================================
     reg        menu_on_s1, menu_on_s2;                  // menu_on  → 像素域（两级）
     reg  [MENU_W-1:0] menu_sel_s1, menu_sel_s2;         // menu_sel → 像素域（两级）
+    // ★ 2026-10-17：`menu_edit` 不再需要送像素域（面板高亮条已删，调节态没有画面反馈）
 
     always @(posedge clk_pix or negedge disp_rst_n) begin
         if (!disp_rst_n) begin
@@ -1002,6 +1232,43 @@ module top_m2 #(
         else begin
             menu_on_s1  <= menu_on;    menu_on_s2  <= menu_on_s1;
             menu_sel_s1 <= menu_sel;   menu_sel_s2 <= menu_sel_s1;
+        end
+    end
+
+    // ============================================================
+    //  ★★★ 2026-10-15【参数菜单·第2步】把"要显示的活值"也同步到像素域
+    // ------------------------------------------------------------
+    //  菜单第 2 步要在面板里显示 `zoom_lv`（缩放档 0..5）和 `sel_aud+1`（音频 1..4）。
+    //  这两根都在 50 MHz 控制域（KEY2/SW3 改的），必须**先同步到 clk_pix 域**才能进
+    //  `menu_ovl`（和 menu_on/menu_sel 同一口径、同一个两级同步器写法、同一个复位）。
+    //  ★ 纯"读"通道：既不回写寄存器，也不参与任何既有逻辑 ⇒
+    //    `menu_on=0` 时它们只是两根没人看的电平，屏上/时序上零影响。
+    //  ★ 面积：`zoom_lv` 3 位 + `sel_aud` 2 位 = 5 个新寄存器（两级同步 = 10 个）——
+    //    这是本步**唯一**新加的时序器件。
+    // ============================================================
+    reg [2:0] zoom_s1, zoom_s2;                  // zoom_lv → 像素域（两级）
+    reg [1:0] aud_s1,  aud_s2;                   // sel_aud → 像素域（两级）
+    // ★★★ 2026-10-17【音量进菜单】：vol_lv → 像素域（两级，和上面同一口径/同一个复位）
+    reg [3:0] vol_s1,  vol_s2;
+    // ★★★ 2026-10-17【亮度进菜单】：bri_lv → 像素域（两级，和音量同一口径/同一个复位）
+    reg [3:0] bri_s1,  bri_s2;
+    // ★★★ 2026-10-18【可视化开关进菜单】：viz_on → 像素域（两级；复位 = 1 显示）
+    reg       viz_s1,  viz_s2;
+
+    always @(posedge clk_pix or negedge disp_rst_n) begin
+        if (!disp_rst_n) begin
+            zoom_s1 <= 3'd0; zoom_s2 <= 3'd0;
+            aud_s1  <= 2'd0; aud_s2  <= 2'd0;
+            vol_s1  <= 4'd15; vol_s2 <= 4'd15;
+            bri_s1  <= 4'd15; bri_s2 <= 4'd15;   // ★ 复位 = 原样（不压暗）
+            viz_s1  <= 1'b1;  viz_s2 <= 1'b1;    // ★ 复位 = 显示（= 加开关之前的行为）
+        end
+        else begin
+            zoom_s1 <= zoom_lv;  zoom_s2 <= zoom_s1;
+            aud_s1  <= sel_aud;  aud_s2  <= aud_s1;
+            vol_s1  <= vol_lv;   vol_s2  <= vol_s1;
+            bri_s1  <= bri_lv;   bri_s2  <= bri_s1;
+            viz_s1  <= viz_on;   viz_s2  <= viz_s1;
         end
     end
 
@@ -1019,7 +1286,15 @@ module top_m2 #(
         //     都**只看这一根输入**，模块内**没有第二处**引用按键输入 ⇒ 只门控这一处就够。
         //   ★ 唯一副作用（预期内）：菜单打开期间按 KEY3，串口字段 6 的 `k1_press_w`
         //     计数不再增加（那是 `stub_ctrl` 的**输出**探针，喂给 `dbg_report`）。
-        .key1(key3 | menu_on), .key2(key2),   // ★ key3（B1）：菜单开着时被屏蔽 / 关着时换下一张
+        // ★★★ 2026-10-17【KEY3 改自动轮播】：手动换一张不再走 KEY3（它是轮播开关），
+        //   换图改为 `adv_req`（上面的 `adv_req_w`，3 秒一次、只在空闲窗口给）。
+        // ★★★ 2026-10-17【KEY2 改"下一张"】（用户改稿）：
+        //   `stub_ctrl` 的按键输入现在是 **KEY2（B2 / 端口 key1）**，仍然按"菜单开着就屏蔽"
+        //   的口径写成 `key1 | menu_on`：
+        //     · 菜单**关**着 ⇒ 恒等于 `key1` ⇒ **按一下 KEY2 = 换下一张**（手动）；
+        //     · 菜单**开**着 ⇒ 恒为 1（没按） ⇒ 不换图，KEY2 那条路让给菜单的"缩放调节"。
+        //   ★ 手动换图和轮播请求同走 `adv_take = k1_press | adv_req`（`stub_ctrl` 内）。
+        .key1(key1 | menu_on), .key2(key2), .adv_req(adv_req_w),
         .sd_ready(a_sd_ready), .a_busy(a_busy), .hold(stwr_busy),
         // ★ 转场握手：屏上全米白了才真的去装；转场期间不受理新请求
         .may_load(ml2), .tr_active(ac2),
@@ -1077,16 +1352,14 @@ module top_m2 #(
     //   绝不越界写进后面的小槽区 / 字幕区。契约常量仍然只在上面 SFX_STRIDE 一处定义。
     top_a #(.SLOT_NUM(2), .AUDIO_MAX_WORDS(SFX_STRIDE)) u_a (
         .sys_clk(clk), .sys_rst_n(sys_rst_n),
-        // ★★★ 2026-10-15：`top_a` 新版**端口表里已经没有 `clk_spi`**（47 个口，旧版 48 个）
-        //   ⇒ 原来那句 `.clk_spi(clk_par),`（2026-10-08 的"SD 提速到 25 MHz"集成临时改动）
-        //   必须删掉，否则报 `HDL-8007: cannot find port 'clk_spi'`。**已删。**
-        //   ★ `clk_par` 本身**没有变成悬空**：它仍是 PLL_0 的输出，并继续供
-        //     `disp_top u_disp`（`.clk_par(clk_par)`，HDMI 串化用）——所以这一根不能删。
-        //   ★★ 代价（不是我这次改出来的行为，但必须点名）：新版 `top_a` 内部
-        //     **整条 A 轨只剩 `sys_clk`(=clk, 50 MHz) 一个时钟域**，
-        //     图像链 SD 读速率由 100/4 = **25 MHz 回落到 50/4 = 12.5 MHz**，
-        //     ⇒ **装一张图的时间大约翻倍**。若 A 侧/装载期间的超时门限按 25 MHz 估过，
-        //     需要重新核一遍。要拿回 25 MHz，见本次报告的「风险点 / 待办」那一节。
+        // ★★★ 2026-10-17【SD 读时钟：25 MHz 试过、**不可靠**，现在退回 12.5 MHz】
+        //   走法：`.clk_spi(clk_par)`（100 MHz）⇒ SCLK = 25 MHz。上板遥测：`load_done` 掉、
+        //   `a_dbg_px_cnt` 以 3.9 Mpx/s 疯跑（= 11.8 MB/s > 25 MHz 的物理上限 3.1 MB/s）
+        //   ⇒ 读回的是错数据、在反复重试。**不是时序问题**：时序报告里 100 MHz 域
+        //   SWNS +0.971 ns、0 违例。⇒ 判定为卡/走线的信号完整性扛不住。
+        //   现在 `top_a` 内部用的是 sys_clk（SCLK 12.5 MHz，实测 379 kpx/s = 1.14 MB/s）；
+        //   这一根保留着，将来换卡/换走线可以一行切回 `clk_par`。
+        .clk_spi(clk),
         .spi_miso(sd_miso), .spi_mosi(sd_mosi),
         .spi_clk(sd_dclk), .spi_cs(sd_ncs),
         // ★★★ 2026-10-08：A 的 top_a 改成**三选一**（`sd_to_wav` 一位 → `sd_mode` 两位）——
@@ -1281,19 +1554,16 @@ module top_m2 #(
     //     有真实负载 ⇒ 一定不会被优化掉。
     //   ★★ 位宽**刚好用满**：TD 只保留"被用到的位"，位宽留大了会被剪掉高位、
     //      甚至改名 → watcher 列表里就找不到那个名字（用户踩过两次）。
-    reg        app_wr_en_qq;                 // 上一拍（做上升沿用）
-    reg [15:0] wr_beats;                     // 引擎"写字"的拍数低 16 位 = 写进 SDRAM 的字数
-    reg [15:0] wr_bursts;                    // 引擎开过多少次突发
-    reg [15:0] clash_cyc;                    // 读写同拍的拍数（累计）
-                                             // ★★★ 2026-10-14 深夜【功能·开关切音频】：本计数器仍在数，
-                                             //   但**暂时不再接到串口字段 27**（那一格借给 `sel_aud` 了，
-                                             //   见 dbg_report 例化处那一段）；查完把字段 27 改回它即可。
+    // ★★★ 2026-10-18【删掉三个没人读的计数器】wr_beats / wr_bursts / clash_cyc
+    //   （+ 只给 wr_bursts 做上升沿的 app_wr_en_qq，共 48 位寄存器 + 3 个 16 位加法器）
+    //   它们的串口格位早被借走（字段 25/26 常量 0、27 给了 sel_aud），**没有任何消费者**，
+    //   留着只是白占面积。交接文档 §⑥ ③ 一直挂在待办里，这次因为"布线打不上"
+    //   （`PHY-8023`，96% slices 太满）顺手删掉腾地方。
+    //   ★ `app_wr_en_q` 保留：它还有真实负载（`clash_lat` 的表达式里）。
     always @(posedge clk_sdr or negedge rst_n) begin
         if (!rst_n) begin
             app_rd_en_q <= 1'b0; app_wr_en_q <= 1'b0;
             clash_q <= 1'b0;     clash_lat   <= 1'b0;
-            app_wr_en_qq <= 1'b0; wr_beats <= 16'd0;
-            wr_bursts <= 16'd0;   clash_cyc <= 16'd0;
         end
         else begin
             app_rd_en_q <= sdr_rd_en;
@@ -1306,11 +1576,6 @@ module top_m2 #(
             //   （用户实测 `clash_lat` 在、`app_wr_en_q` 不在，就是被剪了）。
             //   ★ 以后凡是要给 ChipWatcher 抓的寄存器，都必须挂一个真实负载。
             clash_lat   <= clash_lat | clash_q | (app_rd_en_q & app_wr_en_q);
-            // 写侧镜像
-            app_wr_en_qq <= app_wr_en_q;
-            if (app_wr_en_q)              wr_beats  <= wr_beats + 16'd1;
-            if (app_wr_en_q & ~app_wr_en_qq) wr_bursts <= wr_bursts + 16'd1;
-            if (clash_q)                  clash_cyc <= clash_cyc + 16'd1;
         end
     end
     reg cl1, cl2;
@@ -1396,8 +1661,9 @@ module top_m2 #(
     wire [15:0] sub_sum16;           // ★ 指纹：片上字幕 RAM 求和低 16
     wire [10:0] sub_nz;              // ★ 指纹：第一个非零字下标
     wire        sub_nz_v;
-    wire [10:0] sub_dump_idx;        // ★ 2026-10-11 调试：逐字倒出的下标
-    wire [31:0] sub_dump_word;       // ★ 2026-10-11 调试：逐字倒出的那个字
+    // ★★★ 2026-10-17【资源分配优化】：`sub_dump_idx` / `sub_dump_word`
+    //   （2026-10-11 的"字幕 RAM 逐字倒出"调试线）连同 subtitle_ovl 的探针口一起删除，
+    //   串口字段 21/22/25 改送常量 0（见 dbg_report 例化处）。字段 19/20（指纹）保留。
     wire [31:0] blk_d_data;
 
     vendor_rd_path u_vrd (
@@ -1475,45 +1741,16 @@ module top_m2 #(
     //     bit9 = 显示读请求**被推迟超过 200 拍**过（sticky；200 拍 ≈ 1.6 µs）
     //            有它 = 写突发确实把显示挡住过（配合字段 29 看挡得最久多少拍）
     // ============================================================
-    // ★ 显示读请求被推迟的拍数（字段 29 报最大值）——★ 声明必须在下面两个 always 之前
-    reg [15:0] rd_defer_cnt, rd_defer_max;
-    reg [15:0] dbg_chain;
-    always @(posedge clk_sdr or negedge rst_n) begin
-        if (!rst_n) dbg_chain <= 16'd0;
-        else begin
-            if (d_blk_req_raw) dbg_chain[0] <= 1'b1;
-            if (d_blk_req)     dbg_chain[1] <= 1'b1;
-            if (blk_d_gnt)     dbg_chain[2] <= 1'b1;
-            if (blk_rd_req)    dbg_chain[3] <= 1'b1;
-            if (vrd_ack)       dbg_chain[4] <= 1'b1;
-            if (sdr_rd_en)     dbg_chain[5] <= 1'b1;
-            if (dbg_want_seen) dbg_chain[6] <= 1'b1;
-            if (dbg_lock_seen) dbg_chain[7] <= 1'b1;
-            if (rd_busy_w & wr_busy_w)          dbg_chain[8] <= 1'b1;
-            if (rd_defer_cnt > 16'd200)         dbg_chain[9] <= 1'b1;
-            // ★★ 2026-10-09：bit10 = 音频块读 FIFO 被饿穿过（sticky）
-            //   它是"沙沙声到底是数据错、还是读没跟上"的分水岭。
-            if (aud_dbg_underrun)               dbg_chain[10] <= 1'b1;
-        end
-    end
-
-    // ★★★ 2026-10-08【最小实验】探针（串口字段 29）：**显示读请求被推迟的最大拍数**
-    //   `d_blk_req` 一直举着（拿到第一个字才撤），`blk_d_gnt` 是仲裁器授权 ——
-    //   两者之间"举着但没授权"的最长连续拍数，就是"写突发把显示挡了多久"。
-    //   ★ 基线（没有写突发时）大约 5~10 拍（等官方控制器的 ack 握手）。
-    //   ★ 判读：一次 256 字写突发 ≈ 250 拍以上；只要它 < 一行的时间（3300 拍）
-    //     且图不花，就说明"块级交替"是能用的。
-    always @(posedge clk_sdr or negedge rst_n) begin
-        if (!rst_n) begin
-            rd_defer_cnt <= 16'd0;
-            rd_defer_max <= 16'd0;
-        end
-        else if (d_blk_req && ~blk_d_gnt) begin
-            if (rd_defer_cnt != 16'hFFFF) rd_defer_cnt <= rd_defer_cnt + 16'd1;
-            if (rd_defer_cnt > rd_defer_max) rd_defer_max <= rd_defer_cnt;
-        end
-        else rd_defer_cnt <= 16'd0;
-    end
+    // ★★★ 2026-10-17【面积优化·低风险】读通路 sticky 位图 + 读推迟计数整块删除
+    //  ------------------------------------------------------------
+    //  这里原来有 26 个触发器 + 两个 always：
+    //    ① `dbg_chain[15:0]` —— 读通路各环节"到过没有"的 sticky 位图（串口字段 30）；
+    //    ② `rd_defer_cnt/rd_defer_max` —— 显示读请求被写突发挡住的**最长拍数**（字段 29）。
+    //  两者**只喂遥测**（没有任何逻辑消费它们），而判读早就不靠它们了：
+    //    · "读口活着没有"看字段 15/16（行缓冲读地址在动）；
+    //    · "读写撞车没有"看字段 12 的 bit1（`aud_blk_stall` sticky）。
+    //  ⇒ 整块删除，字段 29/30 接常数 0（**帧格式不变**）。
+    //  回退：把这两段加回来即可（`d_blk_req_raw/…/dbg_lock_seen` 这些信号都还在）。
 
     // ============================================================
     //  3a. 存储本体：★ 例化在【顶层】（和官方例程 / M0 一样）
@@ -1604,56 +1841,22 @@ module top_m2 #(
     //    ★ 第十轮【只盯最左一列、逐行铺开】：pass 只区分"取偶数像素(列0)/奇数像素(列1)"，
     //      组号 g 决定从第 8g 行开始，连续看 8 行 → 40 组铺满第 0..319 行。
     //      这样一次抓取就能看出"每 3 行一个字错"这条周期（上一版一次只抽到 12 处）。
-    reg [2:0]  pass_i;                        // 0..1
-    reg [5:0]  dump_i;                        // 0..39：这一趟里的第几组
-    reg        vs_d;
-    reg [1:0]  dump_div;
-    wire       scan_half  = pass_i[0];                     // 0=偶数像素 1=奇数像素
-    wire [11:0] scan_y_scn = 12'd60 + ({6'd0, dump_i} * 12'd8);   // 这一组的头一行（屏幕行）
-    wire [11:0] scan_x_scn = 12'd80 + {11'd0, scan_half};         // 最左一列（列 0 或 1）
-    always @(posedge clk_pix or negedge sys_rst_n) begin
-        if (!sys_rst_n) begin
-            pass_i <= 3'd0;
-            dump_i <= 6'd0;
-            vs_d   <= 1'b0;
-            dump_div <= 2'd0;
-        end
-        else begin
-            vs_d <= vs_w;
-            if (vs_w & ~vs_d) begin                 // 场同步上升沿 = 新的一帧
-                if (dump_div == 2'd3) begin
-                    dump_div <= 2'd0;
-                    if (dump_i >= 6'd39) begin
-                        dump_i <= 6'd0;
-                        pass_i <= (pass_i >= 3'd1) ? 3'd0 : pass_i + 3'd1;
-                    end
-                    else dump_i <= dump_i + 6'd1;
-                end
-                else dump_div <= dump_div + 2'd1;
-            end
-        end
-    end
-
-    reg [15:0] px0, px1, px2, px3, px4, px5, px6, px7;
-    reg [5:0]  px_grp;              // ★ 和这 8 个字【同一拍】锁存的组号
-                                    //   （串口那边冻结的就是这一对，不会半新半旧）
-    always @(posedge clk_pix or negedge sys_rst_n) begin
-        if (!sys_rst_n) begin
-            px0 <= 16'd0; px1 <= 16'd0; px2 <= 16'd0; px3 <= 16'd0;
-            px4 <= 16'd0; px5 <= 16'd0; px6 <= 16'd0; px7 <= 16'd0;
-            px_grp <= 6'd0;
-        end
-        else if (de_w && (dbg_x == scan_x_scn)) begin
-            if (dbg_y == scan_y_scn + 12'd0) begin px0 <= rgb565_w; px_grp <= dump_i; end
-            if (dbg_y == scan_y_scn + 12'd1) px1 <= rgb565_w;
-            if (dbg_y == scan_y_scn + 12'd2) px2 <= rgb565_w;
-            if (dbg_y == scan_y_scn + 12'd3) px3 <= rgb565_w;
-            if (dbg_y == scan_y_scn + 12'd4) px4 <= rgb565_w;
-            if (dbg_y == scan_y_scn + 12'd5) px5 <= rgb565_w;
-            if (dbg_y == scan_y_scn + 12'd6) px6 <= rgb565_w;
-            if (dbg_y == scan_y_scn + 12'd7) px7 <= rgb565_w;
-        end
-    end
+    // ============================================================
+    //  ★★★ 2026-10-17【删死探针】（原 1773~1822 行整段删除）
+    //  ------------------------------------------------------------
+    //  这里原来是一整套"最左一列逐行扫描"探针：
+    //      pass_i / dump_i / dump_div / vs_d（计数器）
+    //      px0..px7 + px_grp（128+ 个触发器，按 dbg_x/dbg_y 采 8 个点）
+    //  它唯一的消费者是 `dbg_report` 的字段 6~9（经 `reppar` 隔帧交替）。
+    //  ★ 为什么删：上一轮"面积优化"的注释里写着"转场探针已删 ⇒ 字段 6~9 恒 0"，
+    //    但**实际没删干净** —— `.row4(px0)..row7(px3)` 还接着，只是采样列正好落在
+    //    窗口左边缘（当前图/缩放恰好全黑）才读到 0000，属于"注释说谎 + 白占面积"。
+    //  ★ 现在字段 6~9 真的接常数 0（见下面 dbg_report 例化处的 `.row0`~`.row7`），
+    //    整套探针寄存器/计数器一并删掉 ⇒ 省 128+ FF 与若干 12 位比较器。
+    //  ★ 要恢复（查"每 3 行一个字错"那种周期性问题）时：
+    //      git show <旧 commit>:rtl/top_m2.v 搜 pass_i，把 1773~1822 原样贴回来，
+    //      并把 dbg_report 的 `.row0..row7` 改回 `.row4(px0)..row7(px3)`。
+    // ============================================================
 
     // ============================================================
     //  3b. 【已删除】读口自测的"自测图写完后 50ms 触发"延时器
@@ -1808,41 +2011,17 @@ module top_m2 #(
             if (tr_swap)               swap_tgl <= ~swap_tgl;  // 转场走完一次
         end
     end
-    // ② 控制域：把翻转位同步过来 + 取边沿 → 计数
-    reg vt1, vt2, vt3, st1, st2, st3, rt1b, rt2b, rt3b;
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            vt1<=1'b0; vt2<=1'b0; vt3<=1'b0;
-            st1<=1'b0; st2<=1'b0; st3<=1'b0;
-            rt1b<=1'b0; rt2b<=1'b0; rt3b<=1'b0;
-        end
-        else begin
-            vt1<=ver_tgl;   vt2<=vt1;   vt3<=vt2;
-            st1<=swap_tgl;  st2<=st1;   st3<=st2;
-            rt1b<=req_tgl;  rt2b<=rt1b; rt3b<=rt2b;
-        end
-    end
-    reg [7:0] p_k1, p_req, p_start, p_ack, p_ver, p_swap, p_done;
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            p_k1<=8'd0; p_req<=8'd0; p_start<=8'd0; p_ack<=8'd0;
-            p_ver<=8'd0; p_swap<=8'd0; p_done<=8'd0;
-        end
-        else begin
-            if (k1_press_w)         p_k1    <= p_k1    + 8'd1;
-            if (rt2b ^ rt3b)        p_req   <= p_req   + 8'd1;   // 请求（翻转一次）
-            if (a_start)            p_start <= p_start + 8'd1;
-            if (a_wr_ack)           p_ack   <= p_ack   + 8'd1;
-            if (vt2 ^ vt3)          p_ver   <= p_ver   + 8'd1;   // 描述符生效
-            if (st2 ^ st3)          p_swap  <= p_swap  + 8'd1;   // 转场走完
-            if (a_wr_done)          p_done  <= p_done  + 8'd1;
-        end
-    end
-    // ③ 四组探针（接串口字段 6/7/8/9）
-    wire [15:0] tr_p0 = {p_k1,    p_req};
-    wire [15:0] tr_p1 = {p_start, p_ack};
-    wire [15:0] tr_p2 = {p_ver,   p_done};
-    wire [15:0] tr_p3 = {p_swap, 2'b00, ml2, ac2, fs2, fx2, req_pend_w};
+    // ★★★ 2026-10-17【面积优化·低风险】转场探针整块删除
+    //  ------------------------------------------------------------
+    //  这里原来有三样东西：① 三组翻转位同步器（ver/swap/req 各 3 级）；
+    //  ② 七个 8 位计数器（KEY2 次数 / 请求 / a_start / a_wr_ack / 版本变化 /
+    //     转场完成 / a_wr_done）；③ 四个拼好的 16 位探针字 tr_p0..p3
+    //     —— 它们唯一的下家就是串口字段 6~9。
+    //  实测 ≈ 120 LUT，且**只服务遥测**：转场早就调好了，判读也不再依赖它们。
+    //  ⇒ 整块删除，字段 6~9 改为常数 0（**帧格式 33 字段不变**，读串口的脚本照旧）。
+    //  ★ 唯一的同步量 `ver_tgl`/`swap_tgl` 仍然保留 —— 它们在别处被用作事件。
+    //  回退：把这段加回来即可（注释里保留了口径：边沿 = 两级同步后异或）。
+    // ------------------------------------------------------------
 
     // ★★ 2026-09-28：写和读绝不能同时进行，但"只禁读"会把行缓冲饿死
     //    （实测：禁读一段时间后 disp_rd_en 永远是 0、行缓冲再也发不出请求，
@@ -1876,12 +2055,28 @@ module top_m2 #(
         //   ★ 传进去的是**像素域**的同步副本（上面那两级）：菜单关闭（menu_on=0）时
         //     整个菜单层被常数传播消掉 ⇒ 一个门都不多、屏上逐像素回到改前。
         .menu_on(menu_on_s2), .menu_sel(menu_sel_s2),
+        // ★★★ 2026-10-15【参数菜单·第2步】菜单里要显示的活值（像素域同步副本、只读）
+        //   zoom_lv ⇒ 行 0 `ZOOM` 的数值（0..5）；sel_aud+1 ⇒ 行 1 `AUDIO` 的数值（1..4）
+        //   ★ 菜单关闭时这两根只是"没人看的电平"（menu_ovl 里被 menu_on 门掉）。
+        .menu_zoom_lv(zoom_s2), .menu_sel_aud(aud_s2),
+        // ★★★ 2026-10-17【音量进菜单】：行 2 `VOLUME` 的活值（0..15，像素域同步副本、只读）
+        .menu_vol(vol_s2),
+        // ★★★ 2026-10-17【亮度进菜单】：行 3 `BRIGHT` 的活值 0..15 + 真的压暗画面
+        //   （disp_top 里插了一级 `bri_scale`；15 = 原样；菜单面板本身不压暗）
+        .menu_bri(bri_s2),
+        // ★★★ 2026-10-18【可视化开关进菜单】：行 4 `VISUAL` 的 ON/OFF + 真的关掉可视化层
+        //   （disp_top 里用 `~menu_viz_on` 把柱形 mask 和压暗 band 一起门掉）
+        .menu_viz_on(viz_s2),
+        // ★★★ 2026-10-17【音频可视化】音频域那几根（viz 只读旁听）
+        .clk_aud(clk_aud), .rst_aud_n(aud_rst_n),
+        .aud_viz_vld(aud_dbg_vld), .aud_viz_dout(aud_dbg_dout), .aud_viz_next(aud_dbg_next),
         .s_blk_req(sub_blk_req), .s_blk_base(sub_blk_base), .s_blk_len(sub_blk_len),
         .s_blk_gnt(sub_blk_gnt), .s_blk_next(sub_blk_next),
         .s_blk_dv(o_blk_dv[2]), .s_blk_data(sub_blk_data), .s_blk_fin(sub_blk_fin),
         .o_sub_row_cnt(sub_row_cnt), .o_sub_hit(sub_hit),
         .o_sub_sum16(sub_sum16), .o_sub_nz(sub_nz), .o_sub_nz_v(sub_nz_v),
-        .o_sub_dump_idx(sub_dump_idx), .o_sub_dump_word(sub_dump_word),
+        // ★★★ 2026-10-17【资源分配优化】：`.o_sub_dump_idx/.o_sub_dump_word`
+        //   两条接线随 subtitle_ovl 的探针口一起删除（字段 21/22/25 改送 0）。
         .win_on(win_on),
         .win_x0(win_x0), .win_y0(win_y0), .win_w(win_w), .win_h(win_h),
         .step_q16(z_a_step), .off_u_q16(z_a_offu), .off_v_q16(z_a_offv),
@@ -1935,7 +2130,8 @@ module top_m2 #(
         .clk_pix(clk_pix),      .rst_pix_n(sys_rst_n),
 
         // ---- C 轨命令（现在由顶层那个小状态机自产）----
-        .play_sfx(aud_play_req), .sfx_id(4'd0), .volume(8'hFF), .busy(aud_busy_w),
+        .play_sfx(aud_play_req), .stop_sfx(aud_stop_req),
+        .sfx_id(4'd0), .volume({vol_lv, 4'hF}), .busy(aud_busy_w),
         .aud_words_act(aud_words_act),   // ★ 实际字数 → top_aud → sfx_ctrl
 
         // ---- ★★★ 2026-10-06 块级音频读口（接 blk_rd_arb 的音频口）----
@@ -1961,12 +2157,15 @@ module top_m2 #(
         .dbg_sfx_base (aud_dbg_base),
         .dbg_sfx_words(aud_dbg_words),
         .dbg_play_tgl (aud_dbg_play_tgl),
-        .dbg_aud_dout (aud_dbg_dout),
         .dbg_aud_vld  (aud_dbg_vld),
+        .dbg_aud_dout (aud_dbg_dout),
+        .dbg_aud_next (aud_dbg_next),
         .dbg_blk_stall(aud_blk_stall),
         .dbg_aud_cnt  (aud_dbg_cnt),
-        .dbg_aud_sum  (aud_dbg_sum),
-        .dbg_aud_underrun(aud_dbg_underrun)   // ★★ 2026-10-09 饿死探针
+        .dbg_aud_sum  (aud_dbg_sum)
+        // ★★★ 2026-10-17【资源分配优化】：`.dbg_aud_underrun(...)` 这一行已删
+        //   （探针随 aud_blk_rd/top_aud 一起删除）。端口表少一格，
+        //   **串口帧格式与字段数完全不变**（字段 26 由 dbg_report 那侧改送 0）。
     );
 
     // ============================================================
@@ -2024,9 +2223,27 @@ module top_m2 #(
     // ============================================================
     // ★★★ 2026-10-13【换照片时那阵沙沙的修复】：`aud_arm` = "人来按过 KEY3、等着响一次"
     reg         aud_arm;
-    reg  [20:0] aud_words_act;      // ★★★ 本次装入音效的【实际字数】（a_wav_done 时刻 latch a_wr_len）
+    // ★★★ 2026-10-17【提速 · 装载音乐】`aud_first` = "还没装好过第一条音频"
+    //   上面 state 1 那 1 秒（50_000_000 拍 @50MHz）本来只是**开机**为了让用户先看清图片，
+    //   但拨 SW3 换音频时也会照着走一遍 ⇒ 每换一条都要白等 1 秒（实际装载只要 0.2 s 左右）。
+    //   ⇒ 用 `aud_first` 把两者区分开：开机第一趟仍然等 1 秒（行为不变），
+    //     之后（第一条真的装完 = `a_wav_done`）`aud_first` 清零 ⇒ 换音频时**立即开装**。
+    reg         aud_first;
+    // ★ 等多久才开装：开机第一趟 1 s（让用户先看清图片）；之后只是"等上一条停稳"，
+    //   2000 拍 @50MHz = 40 µs —— 足够让 stop 的 toggle 跨到显存域、让在途的音频读收干净。
+    wire [25:0] aud_wait_need = aud_first ? 26'd50_000_000 : 26'd2000;
+    // ★★★ 2026-10-17【修 · 自然放完那一声"啦"】：见下面 `aud_st==2` 里那段长注释。
+    //   raw = 夹到音效区容量；al = 再向下取到 64 字整块（aud_blk_arb 的 BLK_WORDS）。
+    //   ★ 为什么先减 64 再取整：实测**最后一块会多交付 2 个字**（把播放长度取到 64 整块后，
+    //     交付数 49602 = 49600 + 2）。留 64 字的余量 ⇒ 那 2 个字一定还是**歌内真实数据**；
+    //     否则文件长度正好是 64 的整数倍（例如被 SFX_WORDS_CAP=120000 夹住的长音乐）时，
+    //     多出来的 2 个字就是音效区外的陈旧字 ⇒ 那声"啦"会回来。
+    //     代价：最多多丢 127 字 = 5.3 ms 尾巴，听不出来。
+    wire [20:0] aud_len_raw = (a_wr_len > SFX_WORDS_CAP) ? SFX_WORDS_CAP : a_wr_len;
+    wire [20:0] aud_len_al  = (aud_len_raw - 21'd64) & ~21'd63;
     always @(posedge clk or negedge sys_rst_n) begin
         if (!sys_rst_n) begin
+            aud_first      <= 1'b1;
             aud_want       <= 1'b0;
             aud_loaded     <= 1'b0;
             aud_fail       <= 1'b0;
@@ -2036,9 +2253,16 @@ module top_m2 #(
             aud_wait       <= 26'd0;
             aud_arm        <= 1'b0;
             sw3_pend       <= 1'b0;      // ★★★ 2026-10-14 深夜【开关3 切音频】复位清掉挂起的拨动
+            // ★★★ 2026-10-17【修 bug ③】`sel_aud` 原来**没有复位**（全文只有递增那两行赋值）
+            //   ⇒ KEY4 软复位之后，别的音频状态全清、它却留着上一次的选择：
+            //     重装的是"软复位前那条"，和"复位后回到干净状态"的预期不一致，
+            //     而且它是本块里唯一没复位的寄存器（属于漏写，不是设计）。
+            //   ★ 复位后回到第 1 条（= 卡上第一个 .WAV），和上电行为一致。
+            sel_aud        <= {SEL_AUD_W{1'b0}};
         end
         else begin
             aud_load_pulse <= 1'b0;
+            aud_stop_req   <= 1'b0;      // ★ 只在下面"受理 SW3"那一路置一拍
             // ★★★ 2026-10-14 深夜【开关3 切音频】—— 开关3 一变化就先"挂起一次换下一条"
             //   ★ 这一句和 `aud_load_pulse <= 1'b0;` 同级、无条件执行：
             //     变化若发生在"装载中 / 音频还没装好"，事件也不会丢 —— 挂起位一直留着，
@@ -2070,7 +2294,7 @@ module top_m2 #(
             // ★★★ 2026-10-14 深夜【功能·开关3 切音频】—— "拨一下 ⇒ 换下一条音频 + 立刻重装 + 从头播"
             //   ★ 触发事件 = **开关3（SW3 = C6）** 消抖后的"任意方向变化"脉冲，两条并用：
             //       `sw3_change`（本拍刚变）+ `sw3_pend`（变过但还没被受理，见块首置位那句）
-            //     ⇒ 连拨不漏；和 KEY3 彻底解耦（`k1_press_w` 现在只驱动 `stub_ctrl` 换图）。
+            //     ⇒ 连拨不漏；和换图彻底解耦（`k1_press_w` 只驱动 `stub_ctrl` 换图，2026-10-17 起那根是 KEY2）。
             //   ★ 来源依据（C6 / 双边沿 / 不用 `key_press_debounce` 的理由）：
             //     见文件上方 `sel_aud` 声明处那一大段注释 + `lib\util\sw_edge_debounce.v` 文件头。
             //   ★ `sel_aud` 的递增就放在**这个 if 里面**（不是无条件 on sw3_change）：
@@ -2080,11 +2304,23 @@ module top_m2 #(
             //         **真正结束之后**才变，绝不会在装载途中被改坏；
             //       · 也顺手排除"`sub_load_pulse` 与开关3 变化同拍"把字幕那一趟的 skip 带偏。
             //   ★ 取模循环：到"最后一条"回 0，否则 +1。
-            if ((sw3_pend || sw3_change) && aud_loaded && !aud_fail) begin
+            // ★★★ 2026-10-17【修 bug ④】受理条件里原来那个 `&& !aud_fail` 是个**死锁**：
+            //   `aud_fail` 只在 `sys_rst_n` 清（本块复位），而本块一旦 fail
+            //   （找文件失败 / 文件超过音效区容量 / SD 读错）就再也进不了 0/1 态
+            //   ⇒ **SW3 换音频这条功能永久失效，只能按 KEY4 或重新上电**。
+            //   （`SFX_NUM` 设得比卡上实际 .WAV 条数大时必然踩到，注释里写着"需 KEY4 恢复"。）
+            //   ⇒ 改成允许"失败后重试"：`(aud_loaded || aud_fail)` 都受理，
+            //     并且受理时把 `aud_fail` 清掉（下一态就是 1 → 重新装载）。
+            //   ★ 对正常路径逐位无影响：`aud_loaded=1, aud_fail=0` 时条件与原式等价。
+            if ((sw3_pend || sw3_change) && (aud_loaded || aud_fail)) begin
                 aud_loaded <= 1'b0;        // 让它重走装载（= 音效也像图片一样每次刷新）
-                aud_st     <= 2'd1;        // → 等 1 秒 → 装载（state 1 会等 A 链空闲，排在换图之后）
+                aud_fail   <= 1'b0;        // ★ 修 bug ④：失败后允许 SW3 重试，不再需要 KEY4
+                aud_st     <= 2'd1;        // → 等 A 链空闲 + 上一首停稳 → 装载
                 aud_wait   <= 26'd0;
                 sw3_pend   <= 1'b0;        // ★ 受理了：清掉挂起（若本拍同时置位，以后赋值为准 ⇒ 干净）
+                aud_stop_req <= 1'b1;      // ★★★ 2026-10-17【修 · 失真】先停上一首！
+                                           //   否则"旧播放指针 + 已被覆写的区域"= 串味，
+                                           //   而且装载完那一拍 play 还会被 sfx_ctrl 的 !busy 丢掉。
                 // ★★★ 2026-10-14 深夜【功能·开关3 切音频】：换到下一条音频
                 if (sel_aud == SFX_NUM - 1) sel_aud <= {SEL_AUD_W{1'b0}};   // 最后一条 → 回到第 1 条
                 else                        sel_aud <= sel_aud + {{(SEL_AUD_W-1){1'b0}}, 1'b1};
@@ -2104,13 +2340,15 @@ module top_m2 #(
                     aud_st   <= 2'd1;
                 end
             end
-            // ---- 1：先等 1 秒（让用户看到图），再挑一个"没在换图"的时刻开装 ----
+            // ---- 1：等 aud_wait_need（开机 1 s / 换音频 40 µs），再挑"上一首停了、没在换图"的时刻开装 ----
             2'd1: begin
                 if (!load_done_latch) begin
                     aud_st <= 2'd0;
                 end
-                else if (!tr_active && !a_busy && !req_pend_w) begin
-                    if (aud_wait >= 26'd50_000_000) begin      // 1 s @50MHz
+                // ★★★ 2026-10-17【修 · 失真】多等一条 `!aud_busy_w`（= 上一首真的停了才动笔写）：
+                //   音效区和播放读的是同一片 SDRAM，边写边放 ⇒ 旧指针读到新数据 = 串味。
+                else if (!tr_active && !a_busy && !req_pend_w && !aud_busy_w) begin
+                    if (aud_wait >= aud_wait_need) begin   // ★ 换音频时不再白等 1 秒
                         aud_want       <= 1'b1;
                         aud_load_pulse <= 1'b1;
                         aud_st         <= 2'd2;
@@ -2123,11 +2361,28 @@ module top_m2 #(
             2'd2: begin
                 if (a_wav_done) begin
                     aud_loaded    <= 1'b1;
+                    aud_first     <= 1'b0;     // ★ 装好过一条了 ⇒ 以后换音频不再等那 1 秒
                     // ★★★ 2026-10-15【音频溢出保护 · 播放侧】：播放长度【上限 = 音效区容量】
                     //   （120000 字 = 5.0 s @48 kHz）—— 超过 5 秒的部分不放。
                     //   不夹的话会一路播到音效区之外（区外紧挨着小槽区 / 字幕区）⇒ 读乱数据、沙沙。
                     //   ★ 三元夹取：a_wr_len ≤ 上限时结果就等于 a_wr_len ⇒ ≤5 s 的文件逐位不变。
-                    aud_words_act <= (a_wr_len > SFX_WORDS_CAP) ? SFX_WORDS_CAP : a_wr_len;
+                    //
+                    // ★★★ 2026-10-17【修 · 自然放完那一声"啦"（碎音）】
+                    //   上板判据：**自然放到底**有碎音，而**歌还在响时拨 SW3 打断**是干净的
+                    //   —— 两条路唯一的差别是"最后一块"：
+                    //     · SW3 打断走 `stop_sfx` → aud_blk_rd 直接 flush（arp<=wrp_bin、dout_v<=0），
+                    //       根本不发短块；
+                    //     · 自然放完的最后一块是**短块**（49641 = 775×64 + 41 ⇒ 最后只要 41 字），
+                    //       而整首歌里其它块全是满 64 字 —— 短块这条路径平时从不走，
+                    //       官方控制器 read_len 对非对齐长度的对齐/收尾就露在最后这 2 ms 上。
+                    //   ⇒ 播放长度**向下取到 64 字整块**（BLK_WORDS，见 a_image\aud_blk_rd.v），
+                    //     这样从头到尾每一块都是满块，短块路径彻底不用。
+                    //     ★ 实测：最后一块还会**多交付 2 个字**（交付数 49602 = 49600 + 2），
+                    //       所以上面 `aud_len_al` 先减 64 再取整，保证那 2 个字落在歌内真数据上。
+                    //     ★ 代价：最多丢 127 字 = 5.3 ms 的尾巴，听不出来。
+                    //     ★ 兜底：万一文件短到 64 字以下（取整成 0），就用原长度，
+                    //       不能让 0 传下去 —— sfx_ctrl 里 0 的含义是"退回 SFX_STRIDE"。
+                    aud_words_act <= (aud_len_al != 21'd0) ? aud_len_al : aud_len_raw;
                     aud_want     <= 1'b0;
                     aud_play_req <= 1'b1;
                     aud_st       <= 2'd3;
@@ -2347,14 +2602,23 @@ module top_m2 #(
         .bad(a_dbg_px_cnt[23:0]),
         // ★★★ 2026-10-03：字段 6..9 改成【转场探针】（见上面那段）——
         //   M1 时代那组"整行扫描"已经不用了，字段 25..28 仍留着旧的那 4 个字。
-        .row0(tr_p0), .row1(tr_p1), .row2(tr_p2), .row3(tr_p3),
-        .row4(px0), .row5(px1), .row6(px2), .row7(px3),
+        // ★ 2026-10-17【面积优化】：转场探针已删（见前面那段说明）⇒ 字段 6~9 恒 0
+        // ★★★ 2026-10-17【修 bug · 注释与接线终于一致】：
+        //   上一轮只把 `.row0..row3` 接了 0，`.row4..row7` 还接着 `px0..px3`
+        //   （"最左列逐行扫描"探针），而 `dbg_report` 用 `reppar` 隔帧在两枝之间切
+        //   ⇒ 字段 6~9 有一半的帧报的是那几个像素值，跟"恒 0"的注释不符。
+        //   现在把产生逻辑（pass_i/dump_i/px0..px7）整段删了，八字一起接常数。
+        .row0(16'd0), .row1(16'd0), .row2(16'd0), .row3(16'd0),
+        .row4(16'd0), .row5(16'd0), .row6(16'd0), .row7(16'd0),
         // ★ 诊断位图（见上面 dbg_flags）+ 行缓冲被掐断次数
         // ★ 第六轮：字段11 改接【A 自己报的推字个数】低 16 位（正常 153600 → 0x5800）
         .drop_cnt(dbg_flags), .abort_cnt(a_dbg_wr_cnt[15:0]),
         // ★ 行缓冲探针：请求的行首地址 + 实际收到的头两个字
-        .lb_wbase(lb_wbase0[15:0]), .lb_rd0(lb_rd0[15:0]),
-        .lb_rd1(lb_rd1[15:0]),      .lb_words({4'd0, lb_words0}),
+        // ★ 2026-10-17【面积优化·低风险】：行缓冲探针（字段 13~16）接常数 0
+        //   —— 它们每 26 µs 变一次、只有遥测在看，现在不再需要；
+        //   `dbg_report` 里对应的冻结寄存器会被综合自然裁掉（帧格式不变）。
+        .lb_wbase(16'd0), .lb_rd0(16'd0),
+        .lb_rd1(16'd0),      .lb_words(16'd0),
         // ★ 逐字对齐校验：第 1 个字偏几个 / 本趟几个字不对（0 = 逐字全对）
         //   ★★★ 2026-10-09【临时占用 · 查字幕指纹】：这两个口只在"地址图"模式下有意义
         //      （现在屏上是真照片 ⇒ 它们的读数本来就没意义），借来报字幕指纹：
@@ -2369,32 +2633,30 @@ module top_m2 #(
         // ★★ 2026-09-28 第四轮：这四个字段改接"整行扫描组号 + 第一个错像素的位置/值"
         //    （A 那几个诊断数在自测图模式下本来就没有意义，出图版要的话改回来即可）
         // ★ 第六轮：边缘巡检 —— 字段 21..24 = 组号 / 趟号 / 奇偶 / 看的窗口行
-        // ★★★ 2026-10-11【调试临时占用】：字段 21 = 字幕 RAM 逐字倒出的**下标**，
-        //   字段 22 = 那个字的**低 16 位**，字段 25 = 那个字的**高 16 位**。
-        //   配合 PERIOD_MS=16（≈ 一帧一条）就能把整条字幕 RAM 一个字不落地取回来。
-        //   查完改回：字段21/22 = px_grp/pass_i，字段25 = wr_beats。
-        .st_read_cnt({5'd0, sub_dump_idx}),      // 字段21：倒到第几个字
-        .st_bad(sub_dump_word[15:0]),            // 字段22：这个字的低 16 位
+        // ★★★ 2026-10-17【资源分配优化】：字段 21/22/25 的"字幕逐字倒出"探针整套删除
+        //   （subtitle_ovl 端口 + dp 计数器 + 顶层连线），这三格改送**常量 0**。
+        //   ★ dbg_report 的帧格式 / 字段数（NV=33、NB=134 字节）**一个字未动**；
+        //     字段 19/20（字幕指纹：和 = C003 / 首个非零 = 0951）**原样保留**。
+        //   ★ 为什么敢删：这两个数只在 2026-10-11~12 那次"字幕逐字倒出"里用过，
+        //     结论已固化（0/1600 逐字全对）；现在是真图模式，字段 21/22/25 本来就无判读价值。
+        .st_read_cnt(dbg_caro_word),              // 字段 21：轮播/菜单/缩放状态字（见 top_m2 的 dbg_caro_word）
+        .st_bad(caro_dbg_cnt),                    // 字段 22：轮播换图请求计数（不换图就一直是 0）
         // ★ 第六轮：字段 23/24 改接【A 请求的长度 a_wr_len】—— "一帧最后 256 个字
         //   没写进 SDRAM"到底是 A 请求短了、还是引擎少写了一段，看
         //   字段 0/1（引擎实写字数）+ 字段 11（A 自己推的字数）+ 这两个数就能定死。
         .st_off(a_wr_len[15:0]),                 // 字段23：A 请求的长度低 16 位
         .st_first({11'd0, a_wr_len[20:16]}),     // 字段24：A 请求的长度高位
-        // ★★★ 2026-10-14【调试临时占用·查"偶发爆破音"】：字段 26 从
-        //   `wr_bursts`（"引擎开过多少次突发" —— 2026-10-04 那次实验的结论早就有了，
-        //   留着只是习惯）改成 **音频 FIFO 饿穿探针**：
-        //     1 = 本次播放中途 FIFO 被抽干超过 83 µs（= 真掉过采样 ⇒ 那声爆是饿穿）
-        //     0 = 没饿穿 ⇒ 那声爆另有原因（块起始坏数据 / HDMI ACR 侧）
-        //   ★ 判读口径：按 KEY3 或等自动重播**每次播放清零**，所以要在
-        //     "刚听完一声爆、还没开始下一次播放"的那几秒里看这一位。
-        //   查完改回：字段 26 = wr_bursts。
-        // ★★★ 2026-10-14 深夜【功能·开关切音频】字段 27 改接 {15'd0, sel_aud}：
-        //   27 原来接的是 `clash_cyc`（"读写同拍拍数"—— 2026-10-04 那次写侧实验的遗留，
-        //   结论早就有了），现在把它**借给音频选择**：这一格直接读"当前选中第几条音频"。
-        //   判读：01 = 第 1 条（卡上第 1 个 .WAV，skip=0）、02 = 第 2 条（skip=1）……
-        //         ★ 每按一次 KEY3（= 本工程里"开关3"的替代通路），这一格应当在 01/02 之间翻。
-        //   ★★★ 查完改回：字段 27 = `clash_cyc`（改回后就这一行，其它地方一个字都不用动）。
-        .st_w0(sub_dump_word[31:16]), .st_w1({15'd0, aud_dbg_underrun}),
+        // ★★★ 2026-10-17【资源分配优化】：字段 26 由"音频 FIFO 饿穿探针"
+        //   （`aud_dbg_underrun`，2026-10-14 借用的）改成**常量 0** ——
+        //   ① 该探针在 show-ahead 协议下永不成立（判据见 a_image\aud_blk_rd.v 端口表）；
+        //   ② 真正的饿穿/掐断判据是块级仲裁器的 sticky（`aud_blk_stall`），
+        //      走**字段 12 的 bit1**（bit1 = 块级读被掐断过）。
+        //   ★ 未"还原成 wr_bursts"：wr_bursts 是 2026-10-04 实验的遗留（结论已固化），
+        //     接回去只是把一笔已死的计数器搬回串口，读数上没有任何新信息。
+        // ★★★ 2026-10-14 深夜【功能·开关切音频】**字段 27 = {15'd0, sel_aud} 保留** ✗
+        //   —— 这是上板判读"SW3 拨到第几条音频"的唯一读数（01/02/03/04），
+        //     属于本次明确要保留的字段，**一个字不动**。
+        .st_w0(16'd0), .st_w1({12'd0, vol_lv}),
         .st_w2({{(16-SEL_AUD_W){1'b0}}, sel_aud}),
         // ★★ 2026-10-05：字段 28 从"固定 0"改成【音频链状态位图】
         //   高 8 位：bit7=fail bit6=loaded bit5=音频PLL锁 bit4=busy
@@ -2408,12 +2670,13 @@ module top_m2 #(
                 a_dbg_sub_overrun, a_dbg_sub_short, sub_st}),
         // ★★ 2026-10-04：字段 25..28 从 M1 时代的扫描字 px4..px7 改成【写侧镜像】：
         //    25 = 引擎写字拍数(低16) / 26 = 突发次数 / 27 = 读写同拍拍数 / 28 = A 的段长度(低5)
+        // ★★★ 2026-10-17：25/26 现为常量 0、27 为 sel_aud（见上面 ★★★ 那段）
         // ★★ 2026-10-01 实验一：SDRAM 忙 / 刷新 与写使能
         // ★★★ 2026-10-08【最小实验】：字段 29 从"10-01 那次 SDRAM 忙/刷新实验位图"
         //   改成 **显示读请求被推迟的最大拍数**（`rd_defer_max`）——
         //   那次实验的结论早就有了（那两根线的问题被否掉），现在这一格更有用。
         //   判读：0~10 拍 = 一切正常；几百拍 = 被写突发挡过（配合字段 30 的 bit9）。
-        .sb_flags(rd_defer_max),
+        .sb_flags(16'd0),
         // ★★ 2026-10-06：字段 12 的 bit1 从"tag 队列脱钩过"改成
         //   **音频块级读被看门狗掐断过**（tag 机制整条删掉了，这一位留给音频自检）。
         .tag_bad(aud_blk_stall),
@@ -2434,7 +2697,7 @@ module top_m2 #(
         //   32 = 这些字的 32 位和的【低 16 位】（期望 0x4411，和 = 0xB7464411，
         //        见 sd_card_sfx\sfx_checksum.py 复算）
         //   ⇒ 这一版既有显示、又有音频，一次烧录就能同时判这两条。
-        .sb_rise (dbg_chain),
+        .sb_rise (16'd0),
         .sb_col  (aud_dbg_cnt[15:0]),
         .rv_col  (aud_dbg_sum[15:0]),
         .uart_tx(uart_tx)
@@ -2531,26 +2794,16 @@ module top_m2 #(
     assign aud_a_req_g  = aud_a_req & disp_rd_gate;
 
     // ============================================================
-    //  8. 数码管：显示 dbg_wr_cnt（正常 03A980）—— 以串口为准，这是参考
-    // ============================================================
-    wire [6:0] s5, s4, s3, s2, s1, s0;
-    seg_decoder u_d5 (.bin_data(a_dbg_wr_cnt[23:20]), .seg_data(s5));
-    seg_decoder u_d4 (.bin_data(a_dbg_wr_cnt[19:16]), .seg_data(s4));
-    seg_decoder u_d3 (.bin_data(a_dbg_wr_cnt[15:12]), .seg_data(s3));
-    seg_decoder u_d2 (.bin_data(a_dbg_wr_cnt[11:8]),  .seg_data(s2));
-    seg_decoder u_d1 (.bin_data(a_dbg_wr_cnt[7:4]),   .seg_data(s1));
-    seg_decoder u_d0 (.bin_data(a_dbg_wr_cnt[3:0]),   .seg_data(s0));
-
-    seg_scan #(.SCAN_FREQ(200), .CLK_FREQ(50_000_000)) u_seg (
-        .clk(clk), .rst_n(sys_rst_n),
-        .seg_sel(seg_sel), .seg_data(seg_data),
-        .seg_data_0({1'b1, s0}),       // 最高位是小数点，1 = 灭
-        .seg_data_1({1'b1, s1}),
-        .seg_data_2({1'b1, s2}),
-        .seg_data_3({1'b1, s3}),
-        .seg_data_4({1'b1, s4}),
-        .seg_data_5({1'b1, s5})
-    );
+    //  8. 数码管：★ 2026-10-17【面积优化·低风险】整块删掉
+    //  ------------------------------------------------------------
+    //  原来这里用 6 个 `seg_decoder` + 一个 `seg_scan` 把 `a_dbg_wr_cnt`
+    //  （A 轨写字数）显示在板上那 6 位数码管上。实测这块 ≈ 200 LUT，
+    //  但**信息并不丢** —— 同一个计数器就在串口字段 11（`.abort_cnt(a_dbg_wr_cnt[15:0])`）
+    //  和字段 0/1（`sdr_wr_cnt`）里，而判读一律以串口为准。
+    //  ⇒ 为了给音频可视化腾 slice，整块删除，两个引脚输出常灭。
+    //  回退：把 `seg_decoder`/`seg_scan` 的实例加回来即可（模块仍在 lib\util\）。
+    assign seg_sel  = 6'd0;
+    assign seg_data = 8'hFF;      // 段码低有效 ⇒ 全 1 = 全灭
 
 endmodule
 

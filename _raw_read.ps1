@@ -12,7 +12,7 @@
 #    33-field frames both print correctly.
 #  *** KEEP THIS FILE PURE ASCII ***
 # ============================================================
-param([int]$Seconds = 4, [string]$Port = 'COM11')
+param([int]$Seconds = 4, [string]$Port = 'COM3')
 
 $sp = New-Object System.IO.Ports.SerialPort
 $sp.PortName = $Port; $sp.BaudRate = 115200

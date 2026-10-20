@@ -32,10 +32,14 @@ $ErrorActionPreference = 'Continue'
 $defs = if ($NoProbe) { '+define+SIM_SDRAM' } else { '+define+SIM_SDRAM+B_DEBUG_PROBE' }
 Write-Host (">>> macros: " + $defs) -ForegroundColor DarkGray
 
-$ms   = 'C:\altera\14.1\modelsim_ase\win32aloem'
+# ★ 2026-10-13 [local machine paths -- teammates must edit these three lines]
+$ms   = 'D:\altera\14.1\modelsim_ase\win32aloem'
 $here = $PSScriptRoot
-$vend = 'E:\study\fpga\anlu\TD_engineer\sim_release\eg4'
-$m0   = 'E:\study\fpga\onboard_test\M0_bwtest\sim'
+$vend = 'D:\Anlogic\TD_6.2.1_Engineer_6.2.168.116\sim_release\eg4'
+# ★ The M0_bwtest\sim harness (fake_sdram.v + hdmi_core_model.v + tbs) is NOT
+#   present on this machine yet -> this script stops at "MISSING:" below.
+#   Point $m0 at the harness once a teammate hands it over.
+$m0   = 'E:\FPGA\ygcom\pre-release-testing\sim'
 
 if (-not (Test-Path "$ms\vlog.exe")) {
     Write-Host "ModelSim not found: $ms" -ForegroundColor Red
@@ -68,6 +72,10 @@ $files += (Get-ChildItem (Join-Path $here 'b_display') -Filter *.v).FullName
 $files += (Get-ChildItem (Join-Path $here 'a_image')   -Filter *.v).FullName
 $files += (Get-ChildItem (Join-Path $here 'rtl')       -Filter *.v).FullName
 $files += (Get-ChildItem (Join-Path $here 'prj\al_ip') -Filter *.v).FullName
+# 2026-10-20: viz2\ was missing from this list -> elaborate died with
+# "Instantiation of 'viz_time' failed". TD's project (prj\M2.al) has always
+# had these four files; keep the two lists in sync.
+$files += (Get-ChildItem (Join-Path $here 'viz2')      -Filter *.v).FullName
 
 # ---- stand-ins for the two encrypted cores + vendor primitive models ----
 $extra = @(

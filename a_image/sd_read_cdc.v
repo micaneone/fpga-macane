@@ -61,6 +61,10 @@ module sd_read_cdc #(
     output wire        spi_clk,
     output wire        spi_cs,
 
+    // ★★★ 2026-10-17【CMD18 多块读】1 = 允许连续读多块（透传到真 sd_read）
+    //   ★ 这是**慢变电平**（一条链"正在读像素数据"期间恒 1）⇒ 两拍同步就够。
+    input  wire        stream_en,
+
     // ---------------- ★ 快速域时钟（100 MHz ⇒ SCLK = 25 MHz）----------------
     input  wire        clk_fast
 );
@@ -75,6 +79,7 @@ module sd_read_cdc #(
     reg         rq_f1, rq_f2;               // read_req 电平
     reg         id_f1, id_f2;               // init_done 电平
     reg  [31:0] ad_f1, ad_f2;               // read_addr（整段稳定）
+    reg         st_f1, st_f2;               // ★ stream_en（慢变电平）
 
     // ---- fast → 50 ----
     reg         byte_tgl;                   // 每收到一个字节翻一次
@@ -107,10 +112,12 @@ module sd_read_cdc #(
         if (!rst_fast_n) begin
             rq_f1 <= 1'b0; rq_f2 <= 1'b0;
             id_f1 <= 1'b0; id_f2 <= 1'b0;
+            st_f1 <= 1'b0; st_f2 <= 1'b0;      // ★ 默认**不**流式：和原版逐位相同
         end
         else begin
             rq_f1 <= read_req;  rq_f2 <= rq_f1;
             id_f1 <= init_done; id_f2 <= id_f1;
+            st_f1 <= stream_en; st_f2 <= st_f1;
         end
     end
     always @(posedge clk_fast or negedge rst_fast_n) begin
@@ -139,7 +146,8 @@ module sd_read_cdc #(
         .spi_mosi  (spi_mosi),
         .spi_miso  (spi_miso),
         .spi_clk   (spi_clk),
-        .spi_cs    (spi_cs)
+        .spi_cs    (spi_cs),
+        .stream_en (st_f2)                 // ★ 流式开关（同步后）
     );
 
     // ============================================================

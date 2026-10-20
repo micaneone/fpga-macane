@@ -1,0 +1,270 @@
+//==========================================================================
+  //  viz_freq —— 频域：24 段【一阶低通梯级滤波组】频谱（v2：对数刻度）
+  //==========================================================================
+  //
+  //  ── 它是什么 ──
+  //  N 级一阶低通串成"梯级"，相邻两级之差就是那一段的频带能量：
+  //
+  //        x ──►LP(α1)──►LP(α2)──►LP(α3)── … ──►LP(αN)
+  //              y1        y2        y3              yN
+  //        band_k = |y[k-1] − y[k]|     （y[0] = 延迟一拍的 x）
+  //
+  //  一阶低通 y += α·(x−y)，转折频率 f_c ≈ fs·α/(2π)，fs=48kHz ⇒ f_c ≈ 7640·α Hz
+  //  α = 2^-a + 2^-b + 2^-c   ⇒  纯移位，零乘法零除法零 DSP
+  //
+  //  ── ★★★ v2 为什么改成对数刻度 ──
+  //  实测（白噪声，GAIN 固定）：本滤波组从 400Hz 到 4kHz 输出涨了约 36dB，
+  //  而真实音乐的谱形又是"低频一路上涨"——**线性刻度装不下**：
+  //  要么低频全顶死、高频全 0，要么反过来。专业频谱仪用 dB 刻度正是为此。
+  //  这里用【找最高位 + 取下面 3 位小数】近似 log2，约 1.9 dB 一级，
+  //  而且**整个模块只用一个转换器**（在 dump 的那 N 拍里逐段算）。
+  //
+  //  ── 频率安排 ──（约 1/3 倍频程一段，从 ~6.7kHz 铺到 ~13Hz）
+  //  ── ★★★ 握手（2026-10-16 修正：原来那句"aud_vld 是单拍"是错的）──
+  //  aud_blk_rd 对外是【有效电平 + 当拍消费】：
+  //      aud_vld   是【电平】—— 手里有字就一直是 1，**不是单拍脉冲**
+  //      aud_dout  是当前那个字，只在 aud_next 之后一拍才换成下一个
+  //      aud_next  是【单拍】—— 消费端取走那一拍
+  //                （12.288 MHz ÷ 512 = 24 kHz 字率 = 48 kHz 采样率 ÷ 2）
+  //  ⇒ 真正"来了一个新字"的事件 = aud_vld & aud_next
+  //     ✗ 拿 aud_vld 当脉冲用 → 窗口快 512 倍 → 频谱一片平、柱子乱跳
+  //  这里 aud_vld / aud_dout / aud_next 全部【只读】，绝不驱动
+  //  —— 驱动 aud_next = 重复消费 = 音频直接断
+  //
+  //  ── 参数 ──
+  //    N        频段数（= 梯级数），默认 24
+  //    SMP_WIN  每帧统计多少个采样（48k 下 2048 = 42.7ms ≈ 23fps）
+  //    LOG_BIAS 整体抬高的"级数"（1 级 ≈ 1.9dB）。柱子整体太矮就调大
+  //
+  //  ★ 输出接口和 viz_time 完全一样，直接接【另一个】viz_render 即可
+  //  ★★★ 声明全部前置
+  //==========================================================================
+  module viz_freq #(
+      parameter integer N        = 24,
+      parameter integer SMP_WIN  = 2048,
+      parameter integer LOG_BIAS = 16
+  )(
+      input  wire        clk_aud,
+      input  wire        rst_aud_n,
+
+      // ---- 音频采样流（从 aud_blk_rd 来，★ 只读）----
+      input  wire        aud_vld,       // ★ 电平：手里有字就一直是 1
+      input  wire [31:0] aud_dout,
+      input  wire        aud_next,      // ★ 单拍：消费端取走那一拍
+
+      // ---- 输出给 viz_render 的 wr_* ----
+      output reg         wr_en,
+      output reg  [4:0]  wr_addr,
+      output reg  [5:0]  wr_val,
+
+      // ---- 诊断 ----
+      output wire [15:0] dbg_win,      // 本帧已统计的采样数
+      output wire        dbg_dump,     // 1 = 正在逐段输出
+      output wire [5:0]  dbg_hi        // 最高那一段的本帧峰值（对数级）
+  );
+
+      //======================================================================
+      //  ★ 声明全部前置
+      //======================================================================
+      localparam [4:0]  N_1    = N - 1;
+      localparam [15:0] WIN_M1 = SMP_WIN - 1;
+
+      reg  signed [19:0] y [0:N];      // 梯级状态；y[0] 就是延迟一拍的输入
+
+      reg  [1:0]  pend;                // 还有几个采样等着送进梯级
+      reg  [15:0] pd0, pd1;            // 待送的两个采样
+      reg  [15:0] win_cnt;             // 本帧已处理的采样数
+
+      reg  [19:0] pk   [0:N-1];        // 本帧各段的【原始幅度】峰值
+      reg  [19:0] snap [0:N-1];        // 帧末快照（dump 时读这个）
+
+      reg         win_pend;            // 帧到点，等 upd 落下再快照
+      reg         dump_req, dump_act;
+      reg  [4:0]  dump_k;
+
+      // ---- 对数转换（只有一个，dump 时逐段复用）----
+      reg  [19:0] lg_x;
+      reg  [22:0] lg_s;
+      reg  [4:0]  lg_m;
+      reg  [2:0]  lg_f;
+      reg  signed [7:0] lg_h;
+      integer     lg_i;
+
+      integer i;
+
+      // 送给梯级的输入：16 位补码 → 20 位有符号
+      wire signed [19:0] x_in = pend[1] ? {{4{pd1[15]}}, pd1}
+                                        : {{4{pd0[15]}}, pd0};
+      wire upd = (pend != 2'd0);
+
+      // 帧到点且梯级空下来 → 这一拍做快照
+      wire clr_pk = win_pend & ~upd;
+
+      // ★★★ 真正"来了一个新字"的事件。aud_vld 是【电平】不能当脉冲用！
+      wire wr_stb = aud_vld & aud_next;
+
+      assign dbg_win  = win_cnt;
+      assign dbg_dump = dump_act;
+      assign dbg_hi   = pk[0];
+
+      //======================================================================
+      //  y[0]：输入延迟一拍。这样所有梯级的源都是"寄存器"，时序齐整
+      //======================================================================
+      always @(posedge clk_aud or negedge rst_aud_n) begin
+          if (!rst_aud_n) y[0] <= 20'sd0;
+          else if (upd)   y[0] <= x_in;
+      end
+
+      //======================================================================
+      //  梯级本体：每级一个独立的 always（生成块里各写各的，不会多驱动）
+      //======================================================================
+      genvar g;
+      generate
+      for (g = 1; g <= N; g = g + 1) begin : STG
+
+          reg  [3:0]         s1, s2, s3;
+          reg  signed [19:0] dlt;
+
+          wire signed [19:0] src = (g == 1) ? y[0] : y[g-1];
+
+          // ★ 移位表：α = 2^-s1 + 2^-s2 + 2^-s3
+          //   注释放的是 f_c = 7640×α，即"这一段的上边界"
+          //   ★ v2 修掉：原来第 1 段 α=1.156>1，那不是低通（极点跑到负半轴），
+          //     整张表往下挪一位，顶端改成 α=0.875（≈6.7kHz）
+          always @(*) begin
+              dlt = src - y[g];
+              case (g)
+                  1 : begin s1 = 4'd1;  s2 = 4'd2;  s3 = 4'd3;  end // α=0.8750  ~6685 Hz
+                  2 : begin s1 = 4'd1;  s2 = 4'd3;  s3 = 4'd4;  end // α=0.6875  ~5252 Hz
+                  3 : begin s1 = 4'd1;  s2 = 4'd6;  s3 = 4'd7;  end // α=0.5234  ~3999 Hz
+                  4 : begin s1 = 4'd2;  s2 = 4'd3;  s3 = 4'd5;  end // α=0.4063  ~3104 Hz
+                  5 : begin s1 = 4'd2;  s2 = 4'd5;  s3 = 4'd5;  end // α=0.3125  ~2388 Hz
+                  6 : begin s1 = 4'd3;  s2 = 4'd4;  s3 = 4'd4;  end // α=0.2500  ~1910 Hz
+                  7 : begin s1 = 4'd3;  s2 = 4'd5;  s3 = 4'd5;  end // α=0.1875  ~1433 Hz
+                  8 : begin s1 = 4'd3;  s2 = 4'd7;  s3 = 4'd7;  end // α=0.1406  ~1074 Hz
+                  9 : begin s1 = 4'd4;  s2 = 4'd5;  s3 = 4'd6;  end // α=0.1094   ~836 Hz
+                  10: begin s1 = 4'd4;  s2 = 4'd6;  s3 = 4'd7;  end // α=0.0859   ~656 Hz
+                  11: begin s1 = 4'd5;  s2 = 4'd6;  s3 = 4'd6;  end // α=0.0625   ~478 Hz
+                  12: begin s1 = 4'd5;  s2 = 4'd6;  s3 = 4'd8;  end // α=0.0508   ~388 Hz
+                  13: begin s1 = 4'd5;  s2 = 4'd8;  s3 = 4'd8;  end // α=0.0391   ~298 Hz
+                  14: begin s1 = 4'd6;  s2 = 4'd7;  s3 = 4'd8;  end // α=0.0273   ~209 Hz
+                  15: begin s1 = 4'd6;  s2 = 4'd8;  s3 = 4'd8;  end // α=0.0234   ~179 Hz
+                  16: begin s1 = 4'd6;  s2 = 4'd10; s3 = 4'd10; end // α=0.0176   ~134 Hz
+                  17: begin s1 = 4'd7;  s2 = 4'd8;  s3 = 4'd9;  end // α=0.0137   ~104 Hz
+                  18: begin s1 = 4'd7;  s2 = 4'd9;  s3 = 4'd11; end // α=0.0103    ~78 Hz
+                  19: begin s1 = 4'd8;  s2 = 4'd9;  s3 = 4'd9;  end // α=0.0078    ~60 Hz
+                  20: begin s1 = 4'd8;  s2 = 4'd9;  s3 = 4'd12; end // α=0.0061    ~47 Hz
+                  21: begin s1 = 4'd8;  s2 = 4'd11; s3 = 4'd12; end // α=0.0046    ~35 Hz
+                  22: begin s1 = 4'd9;  s2 = 4'd10; s3 = 4'd11; end // α=0.0034    ~26 Hz
+                  23: begin s1 = 4'd9;  s2 = 4'd11; s3 = 4'd12; end // α=0.0027    ~21 Hz
+                  24: begin s1 = 4'd10; s2 = 4'd11; s3 = 4'd12; end // α=0.0017    ~13 Hz
+                  default: begin s1 = 4'd1; s2 = 4'd2; s3 = 4'd3; end // N>24 时复用这条
+              endcase
+          end
+
+          wire signed [19:0] inc = (dlt >>> s1) + (dlt >>> s2) + (dlt >>> s3);
+
+          // 本拍这一段的原始幅度
+          wire [19:0] mag = dlt[19] ? (~dlt + 20'd1) : dlt[19:0];
+
+          always @(posedge clk_aud or negedge rst_aud_n) begin
+              if (!rst_aud_n) begin
+                  y[g]    <= 20'sd0;
+                  pk[g-1] <= 20'd0;
+              end
+              else if (clr_pk)                       // 帧末清峰值（优先级最高）
+                  pk[g-1] <= 20'd0;
+              else if (upd) begin
+                  y[g] <= y[g] + inc;
+                  if (mag > pk[g-1]) pk[g-1] <= mag; // ★ 存原始幅度，不做线性压缩
+              end
+          end
+      end
+      endgenerate
+
+      //======================================================================
+      //  ★ 对数转换：20 位幅度 → 6 位"级"（约 1.9 dB 一级）
+      //     级 = 3×最高位序号 + 最高位下面第 2..0 位   （0 表示静音）
+      //======================================================================
+      always @(*) begin
+          lg_x = snap[dump_k];
+          lg_s = lg_x << 3;                      // 先左移 3 位，下面按 m+1 取就能
+                                                 // 正好落在这 3 个小数位上
+          lg_m = 5'd0;
+          for (lg_i = 0; lg_i < 20; lg_i = lg_i + 1)
+              if (lg_x[lg_i]) lg_m = lg_i[4:0];  // 最后一个为真的 = 最高位
+
+          lg_f = lg_s[lg_m + 5'd1 +: 3];         // 最高位下面那 3 位，∈ 4..7
+
+          lg_h = lg_m * 3 + lg_f - 7'd4 + LOG_BIAS;
+          if (lg_x == 20'd0) lg_h = 8'sd0;       // 静音 → 0
+          else if (lg_h < 8'sd0) lg_h = 8'sd0;
+          else if (lg_h > 8'sd63) lg_h = 8'sd63;
+      end
+
+      //======================================================================
+      //  帧计数 / 逐段输出
+      //======================================================================
+      always @(posedge clk_aud or negedge rst_aud_n) begin
+          if (!rst_aud_n) begin
+              pend     <= 2'd0;
+              pd0      <= 16'd0;
+              pd1      <= 16'd0;
+              win_cnt  <= 16'd0;
+              win_pend <= 1'b0;
+              dump_req <= 1'b0;
+              dump_act <= 1'b0;
+              dump_k   <= 5'd0;
+              wr_en    <= 1'b0;
+              wr_addr  <= 5'd0;
+              wr_val   <= 6'd0;
+              for (i = 0; i < N; i = i + 1) snap[i] <= 20'd0;
+          end
+          else begin
+              wr_en <= 1'b0;
+
+              // ---------- ① 采样入队（每来一个"新字"收 2 个采样）----------
+              if ((pend == 2'd0) && wr_stb) begin
+                  pd0  <= aud_dout[15:0];
+                  pd1  <= aud_dout[31:16];
+                  pend <= 2'b11;
+              end
+              else if (pend != 2'd0)
+                  pend <= {1'b0, pend[1]};
+
+              // ---------- ② 帧计数 ----------
+              if (upd) begin
+                  if (win_cnt >= WIN_M1) begin
+                      win_cnt  <= 16'd0;
+                      win_pend <= 1'b1;      // ★ 等 upd 落下来再快照
+                  end
+                  else
+                      win_cnt <= win_cnt + 16'd1;
+              end
+
+              // ---------- ③ 帧到点：等梯级空下来再快照 ----------
+              if (clr_pk) begin
+                  win_pend <= 1'b0;
+                  for (i = 0; i < N; i = i + 1)
+                      snap[i] <= pk[i];      // 读旧值 ⇒ 和生成块里的清 0 不冲突
+                  dump_req <= 1'b1;
+              end
+
+              // ---------- ④ 逐段输出（低频在左）----------
+              if (dump_act) begin
+                  wr_en   <= 1'b1;
+                  wr_addr <= N_1 - dump_k;   // 第 1 段(最高频) → 最右
+                  wr_val  <= lg_h[5:0];      // ★ 送出去的是对数级
+                  dump_k  <= dump_k + 5'd1;
+                  if (dump_k == N_1)
+                      dump_act <= 1'b0;
+              end
+              else if (dump_req) begin
+                  dump_req <= 1'b0;
+                  dump_act <= 1'b1;
+                  dump_k   <= 5'd0;
+              end
+          end
+      end
+
+  endmodule

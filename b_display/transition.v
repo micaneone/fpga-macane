@@ -85,16 +85,46 @@ module transition (
     wire [15:0] mix_to   = white_b ? bg_color : px_b;
 
     // ============================================================
-    //  ② 硬切换（划像 / 百叶窗）：纯比较器，0 DSP
+    //  ② 软边混合（划像 / 百叶窗 / 交叉淡化 统一走"逐像素系数"）
+    //
+    //  ★★★ 2026-10-17【治"画面切换不够丝滑"】
+    //   原来是**硬边**：划像 `pix_x/4 < prog`、百叶窗 `pix_y[4:0] < prog[8:3]`，
+    //   而 transition_ctrl 每帧只让 prog 走 16（整场 16 帧 ≈ 0.27 s）：
+    //     · 划像 = 800 px ÷ 12.5 步 ⇒ **每帧跳 64 px**，整幅只出现 12 个位置；
+    //     · 百叶窗 = prog[8:3] 每帧 +2 行 ⇒ 每个条带只展开 8 档。
+    //   肉眼看到的就是"一档一档地跳"，也就是用户说的不够丝滑。
+    //   ⇒ 三个模式**全部**改走"每像素系数 + 淡化乘法器"，即**软边**：
+    //     · 划像：界线中心还是 prog*4 px，但改成一个 **64 px 宽的渐变带**；
+    //     · 百叶窗：每条带子的前沿也做成 **8 行宽的渐变带**；
+    //     · 交叉淡化本来就是软的，系数直接就是 prog。
+    //   ★ 一点面积都不加：`mix565` 那 3 个乘法器**本来就在**（交叉淡化用），
+    //     这里只是把喂给它的系数从"常数 prog"换成"逐像素系数"。
+    //   ★ 两头仍然**精确**：prog=0 ⇒ 系数 0 ⇒ 输出逐位等于 A 端；
+    //     prog=256 ⇒ 系数 256 ⇒ 输出逐位等于 B 端
+    //     （mix565 的除法带四舍五入，两头误差为 0 —— 这正是本文件"9 位 prog"的理由）。
     // ============================================================
-    //  划像：pix_x/4 < prog  →  界线在 prog*4 个像素处
-    wire wipe_sel  = ({1'b0, pix_x[11:2]} < {1'b0, prog});
-    //  百叶窗：pix_y 的低 5 位（32 行一个周期）< 已展开到第几行
-    wire blind_sel = ({1'b0, pix_y[4:0]}   < {1'b0, prog[8:3]});
+    //  划像（软边 128 px ⇒ 屏幕宽度的 16%）：中心 = prog*4，系数 = clamp(中心 − x, 0, 128) × 2
+    wire [11:0] wipe_pos = {2'b00, prog} * 12'd4;                 // 0..1024
+    wire [11:0] wipe_dx  = (wipe_pos > {1'b0, pix_x}) ? (wipe_pos - {2'b00, pix_x})
+                                                     : 12'd0;
+    wire [8:0]  k_wipe   = (wipe_dx >= 12'd128) ? 9'd256
+                                               : {2'b00, wipe_dx[6:0], 1'b0};     // ×2 ⇒ ≤254
 
-    wire [15:0] hard_out = (mode == M_WIPE)  ? (wipe_sel  ? mix_to : mix_from)
-                         : (mode == M_BLIND) ? (blind_sel ? mix_to : mix_from)
-                         : mix_from;
+    //  百叶窗（软边 8 行）：展开到第 pos 行，系数 = clamp(pos − y[4:0], 0, 8) × 32
+    //   ★ pos = prog[8:3] + prog[8:5]（= 原值 ×1.25，0..40，不是 0..32）：仿真抓到过——
+    //     pos 最大只有 32 时，最下面那条带子（y[4:0]=31）要 pos ≥ 39 才能到 100%，
+    //     于是 prog=256 时还有一批点没变成新图，swap 那一拍就会"跳一下"。
+    //     （★ 除法别写错：prog[8:3]/4 = prog[8:5]，不是 prog[7:5] —— 第一版写错，仿真又抓了一次。）
+    wire [5:0]  blind_pos = {1'b0, prog[8:3]} + {2'b00, prog[8:5]};   // 0..40
+    wire [5:0]  blind_y   = {1'b0, pix_y[4:0]};                   // 0..31
+    wire [5:0]  blind_d   = (blind_pos > blind_y) ? (blind_pos - blind_y) : 6'd0;
+    wire [8:0]  k_blind   = (blind_d >= 6'd8) ? 9'd256
+                                              : {1'b0, blind_d[2:0], 5'b00000};   // ×32 ⇒ ≤224
+
+    //  逐像素系数：交叉淡化直接用 prog
+    wire [8:0]  k_pix = (mode == M_WIPE)  ? k_wipe
+                      : (mode == M_BLIND) ? k_blind
+                      : prog;
 
     // ============================================================
     //  ③ 淡化：R/G/B 三个通道各一次"差值 × 系数"
@@ -130,14 +160,13 @@ module transition (
         end
     endfunction
 
-    wire [15:0] fade_out = mix565(mix_from, mix_to, prog);
+    // ★ 2026-10-17：系数改成逐像素（软边）。PASS 仍直通 A 端（一个乘法器都不走）。
+    wire [15:0] fade_out = mix565(mix_from, mix_to, k_pix);
 
     // ============================================================
     //  ④ 选一个 + 寄存一拍
     // ============================================================
-    wire [15:0] mix = (mode == M_PASS)  ? mix_from
-                    : (mode == M_XFADE) ? fade_out
-                    : hard_out;
+    wire [15:0] mix = (mode == M_PASS) ? mix_from : fade_out;
 
     always @(posedge clk_pix or negedge rst_pix_n) begin
         if (!rst_pix_n) begin

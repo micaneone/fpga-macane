@@ -84,6 +84,12 @@
         )(
             // ---------------- 时钟复位 ----------------
             input         sys_clk,          // 50 MHz
+            // ★★★ 2026-10-17【拿回 SD 25 MHz】SD 读的移位器（`sd_read_cdc` 的 fast 侧）用这根：
+            //   顶层接 100 MHz ⇒ SCLK = 100/4 = **25 MHz**（接 sys_clk 就是 12.5 MHz）。
+            //   10-15 合流时这个端口被删掉、`sd_top.clk_spi` 只好接 sys_clk ⇒ 装图时间翻倍
+            //   （见 `rtl\top_m2.v` 里那段自述）。实测（12.5 MHz）：A 轨 379 kpx/s = 1.14 MB/s，
+            //   1.77 Mpx 的图要 4.7 s。★ 只影响**读**：`sd_init`（400 kHz 那条）一直用 sys_clk。
+            input         clk_spi,
             input         sys_rst_n,
 
             // ---------------- SD 卡引脚（内部三选一后接出去）----------------
@@ -190,10 +196,63 @@
             wire        fe_req_bmp, fe_req_wav, fe_req_sub;
             wire [31:0] fe_lba;          // 按 sd_mode_r 三选一 → sd_top.read_addr
             wire        fe_req;          // 按 sd_mode_r 三选一 → sd_top.read_req
+            // ★★★ 2026-10-17【CMD18 多块连续读】：图像链"正在读像素数据"时允许连续读多块，
+            //   省掉每块一次的卡访问延迟（实测约 120 µs/块 ⇒ 装载约快 1.3x）。
+            //   ★ 只有图像链用：wav/sub 的文件只有几十个扇区，且中途还会跳扇区，不值当。
+            wire        sd_stream_bmp;
             wire [7:0]  fe_data;         // ← sd_top.data_out（广播给三条链）
             wire        fe_ok, fe_done, fe_busy, fe_err;
             wire        fe_init_done;    // ← sd_top.bus_owner
             wire        fe_led;          // ← sd_top.led1
+
+            //==================================================================
+            //  ★★★ 2026-10-16【切法C·find_bmp 合流】：FAT/目录索引 FSM 三合一
+            //   原来三条链各带一份逐字相同的 FAT/目录/簇链状态机
+            //   （只有 TARGET_EXT 和 skip 不同），现在全工程只有一份 `u_find_eng`
+            //   （= find_bmp_eng，在 a_image\find_bmp.v 里）：
+            //     · 请求侧：三条链各出一个 start 脉冲（top_a 已经用**组合的** sd_mode
+            //       分好了 ⇒ 同一时刻最多一条链有 start）；用 sd_mode_r 选出
+            //       「谁在查」= eng_sel，并把对应扩展名/地址往上送。
+            //     · 结果侧：引擎的结果由 arb_result_owner 分发给对应父模块，
+            //       并且**打一拍**再连同 eng_done/eng_fail 一起发出去 ——
+            //       这样父模块看到的 (f_done, f_sector, f_size) 与原版同时刻关系一致。
+            //   ★ 怎么保证"同一时刻只有一条链在查"（红线）：
+            //     ① 引擎的 start 是 3 个脉冲的或 —— 三条链的 start 都由组合 sd_mode
+            //        门控，一次只可能有一条；
+            //     ② 引擎在 start 那拍锁存 owner（= sd_mode_r 对应的那条），整次查询
+            //        期间不变；非 owner 的 fe_ok/fe_done/fe_err 在引擎内部被门控成 0
+            //        ⇒ 就算两条链同时误启动，非当家那条也只会走看门狗 → fail；
+            //     ③ 引擎 busy 期间 top_a 只把「当家链选出来的地址」送去前端
+            //        （fe_lba/fe_req 的 sd_mode_r 三选一，和 fe_data 广播那套对称）。
+            //==================================================================
+            // ★★★ 2026-10-16【清理冗余 viz + 修 top_a 多重驱动】
+            //   ★ 删掉 `eng_lba_bmp/wav/sub`、`eng_req_bmp/wav/sub`、`eng_busy_bmp/wav/sub`
+            //     这三行**悬空网线声明**：切法C 之后它们已经没有任何驱动源 ——
+            //     三条 analyze 薄壳的 `eng_lba_i/eng_req_i` 都是**输入**
+            //     （bmp_analyze.v:25-26 / wav_analyze.v:68-69 / sub_analyze.v:105-106），
+            //     它们不再自己算扇区地址；地址的唯一来源是下面唯一引擎 u_find_eng 的
+            //     `eng_lba/eng_req` 输出。留着这三行只会让 333 行那个残留 mux
+            //     去读悬空网线（= 把 X 静默送去前端）。
+            wire [23:0] eng_ext_bmp, eng_ext_wav, eng_ext_sub;
+            wire [3:0]  eng_skip_bmp, eng_skip_wav, eng_skip_sub;
+            wire        eng_start_bmp, eng_start_wav, eng_start_sub;
+            wire        eng_done_bmp, eng_done_wav, eng_done_sub;
+            wire        eng_fail_bmp, eng_fail_wav, eng_fail_sub;
+            // 引擎结果总线（打拍后广播）
+            wire [31:0] eng_res_sector, eng_res_size, eng_res_cluster;
+            wire        eng_res_done, eng_res_fail;
+            reg  [31:0] eng_sec_r, eng_siz_r, eng_clu_r;
+            reg         eng_done_r, eng_fail_r;
+            // 引擎请求侧
+            wire [31:0] eng_lba_o;         // 引擎自算地址（三选一后回送给三条链）
+            wire        eng_req_o;         // 引擎读请求
+            wire [23:0] eng_ext_sel;
+            wire [3:0]  eng_skip_sel;
+            wire        eng_start;
+            wire        eng_owner_sel;
+            wire        eng_busy_o;        // ← 引擎自己的 busy（回送给三条链做让位仲裁）
+            wire        eng_use;           // 引擎正在查文件（= 三条链 busy 的或）
+
 
             // ---- 图像写口 ----
             wire        bm_req, bm_we;
@@ -263,9 +322,142 @@
             assign fe_req = mode_is_sub ? fe_req_sub :
                             mode_is_wav ? fe_req_wav : fe_req_bmp;
 
+            //==================================================================
+            //  ★★★ 2026-10-16【切法C·find_bmp 合流】请求/结果仲裁 + 唯一引擎
+            //==================================================================
+            // ---- start 分发给谁（★ 用组合的 sd_mode，不是寄存过的）----
+            //   ★ 声明前置：下面仲裁和三个父实例都要用（这个工程踩过"先用后声明"）
+            wire bmp_start = start & (sd_mode == 2'd0);
+            wire wav_start = start & (sd_mode == 2'd1);
+            wire sub_start = start & (sd_mode == 2'd2);
+
+            // ---- 谁在查（★ 全部用**组合的** sd_mode，和 start 的分配口径一致）----
+            //   因为 start 就是组合分发的（`start & (sd_mode==N)`），同一拍必须能对上号。
+            //   引擎在 start 那拍把 owner / 扩展名 / skip 一起锁存，之后整次查询不再看它们。
+            //   ★ owner 的口径：`start` 只发给「组合 sd_mode 选中的那一条」⇒
+            //     **发起者天然就是当家链**，owner 在 start 那拍恒为 1（三条 start 的或）。
+            //   ★★ 为什么不能用 fe_owner / mode_is_* 去算：`sd_mode_r` 是在**同一拍**才锁存
+            //     新模式的（`start && !sd_busy` 那一拍）⇒ start 当拍读 mode_is_* 拿到的是
+            //     上一笔传输的旧模式，第一笔必然错。
+            //   ★★★ 2026-10-17 修正：原写法是 `eng_start_wav | eng_start_sub`
+            //     = "不是装图才算当家" ⇒ 装图（sd_mode==0）时 owner=0，
+            //     引擎内部把前端 sd_ok/sd_done/sd_busy/sd_err 全门成 0
+            //     ⇒ 装图必然走看门狗失败、屏上连首页都出不来。
+            //     （见 a_image\README_atrack_reverted.md 的第 ② 条）
+            assign eng_owner_sel = eng_start_bmp | eng_start_wav | eng_start_sub;
+
+            // ---- 请求三选一：扩展名 / skip ----
+            // ★★★ 2026-10-17【修正 · 这里必须用寄存的 mode_is_*，不能用组合 sd_mode】
+            //   引擎的 start 不是顶层那个 1 拍脉冲，而是**薄壳从分析器内部 `f_start` 送出的**，
+            //   比顶层 start 晚几拍；那时组合 `sd_mode` 已经回落（装图/0）⇒ 字幕链会拿
+            //   "BMP" 去查、把查到的 BMP 当 1bpp 解析 ⇒ sub_fail + short。
+            //   实测现象就是"图/音频都好了、只有字幕 fail"。
+            //   `sd_mode_r` 在顶层 start 那拍就锁存（`start && !sd_busy`）且整次传输不变，
+            //   正是引擎延后取用时需要的口径。
+            assign eng_ext_sel  = mode_is_sub ? eng_ext_sub  :
+                                  mode_is_wav ? eng_ext_wav  : eng_ext_bmp;
+            assign eng_skip_sel = mode_is_sub ? eng_skip_sub :
+                                  mode_is_wav ? eng_skip_wav : eng_skip_bmp;
+
+            // ---- 引擎自己的地址/请求 ----
+            // ★★★ 2026-10-16【清理冗余 viz + 修 top_a 多重驱动】
+            //   ★★ 根因：这里原来还有两条 `assign`（照抄上面 fe_lba/fe_req 那套
+            //     「三条链各算各的、top_a 三选一」模式**残留**下来的）：
+            //         assign eng_lba_o = mode_is_sub ? eng_lba_sub : ...;
+            //         assign eng_req_o = mode_is_sub ? eng_req_sub : ...;
+            //     切法C 之后 `eng_lba_o/eng_req_o` 已经由唯一引擎 u_find_eng 的
+            //     `eng_lba/eng_req` **输出端口**驱动（find_bmp.v:214-215），
+            //     于是同一根 net 有了两个驱动源 ⇒ TD 报
+            //         HDL-8007 net 'eng_lba_o' is constantly driven from multiple places
+            //         HDL-8007 net 'eng_req_o' is constantly driven from multiple places
+            //     ⇒ `top_a` 降级成黑盒 ⇒ `PRJ-8806 syn_1 exited unexpectedly`。
+            //   ★ 而且那两条 assign 的右值（eng_lba_bmp/wav/sub、eng_req_bmp/wav/sub）
+            //     在切法C 之后**根本没有任何驱动**，所以它不只是"多一个驱动"——
+            //     就算让它当家，也是把悬空值送去前端 = 无声的错。两条都不能留。
+            //   ★ 修法：**只删这两条残留 assign**（连同上面三行悬空声明），
+            //     保留引擎输出作为唯一驱动源 —— 这正是切法C 的原意图：
+            //       引擎算地址 → 三薄壳按 eng_owner 让位后各自 fe_lba/fe_req 出口
+            //       → top_a 的 fe_lba/fe_req 三选一 → u_sd_front。
+            //   ★ 本次**没有**新增/改动任何 A 轨信号，也没接常量/悬空。
+
+            // ---- 引擎忙？（★ 电平：引擎 FSM 自己锁存的那一位）----
+            assign eng_use   = eng_busy_o;
+            assign eng_start = eng_start_bmp | eng_start_wav | eng_start_sub;
+
+            // ---- 结果：引擎一路广播（同一时刻只有一个文件在查）----
+            //   三条链都拿到同一份，但只有发起者那拍在听（它的 done 才刚发出来）。
+            always @(posedge sys_clk or negedge sys_rst_n) begin
+                if (!sys_rst_n) begin
+                    eng_sec_r  <= 32'd0;
+                    eng_siz_r  <= 32'd0;
+                    eng_clu_r  <= 32'd0;
+                    eng_done_r <= 1'b0;
+                    eng_fail_r <= 1'b0;
+                end
+                else begin
+                    eng_done_r <= 1'b0;
+                    eng_fail_r <= 1'b0;
+                    if (eng_res_done) begin
+                        eng_sec_r  <= eng_res_sector;
+                        eng_siz_r  <= eng_res_size;
+                        eng_clu_r  <= eng_res_cluster;
+                        eng_done_r <= 1'b1;
+                    end
+                    if (eng_res_fail) eng_fail_r <= 1'b1;
+                end
+            end
+
+            //==================================================================
+            //  ★ FAT/目录索引引擎：全工程唯一一份
+            //==================================================================
+            find_bmp_eng u_find_eng (
+                .sys_clk         (sys_clk),
+                .sys_rst_n       (sys_rst_n),
+
+                // 共享前端应答（广播）
+                .fe_init_done    (fe_init_done),
+                .fe_data         (fe_data),
+                .fe_ok           (fe_ok),
+                .fe_done         (fe_done),
+                .fe_busy         (fe_busy),
+                .fe_err          (fe_err),
+
+                // 请求（三选一；start 是三条链的或，owner 用组合 sd_mode）
+                .start           (eng_start),
+                .owner           (eng_owner_sel),
+                .target_ext      (eng_ext_sel),
+                .cmd             (1'b0),          // ★ 三条链都只找文件
+                .skip            (eng_skip_sel),
+                .in_cluster      (32'd0),         // cmd=0 用不到
+
+                // 引擎自己的读请求（→ 三选一回送给三条链，由薄壳做让位仲裁）
+                .eng_lba         (eng_lba_o),
+                .eng_req         (eng_req_o),
+                .eng_busy        (eng_busy_o),
+
+                // 结果
+                .eng_res_sector  (eng_res_sector),
+                .eng_res_size    (eng_res_size),
+                .eng_res_cluster (eng_res_cluster),
+                .eng_res_done    (eng_res_done),
+                .eng_res_fail    (eng_res_fail)
+            );
+
+            // ★ 引擎的结果已经打过一拍；广播给三条链（只有发起者那拍在听）
+            assign eng_done_bmp = eng_done_r;   assign eng_fail_bmp = eng_fail_r;
+            assign eng_done_wav = eng_done_r;   assign eng_fail_wav = eng_fail_r;
+            assign eng_done_sub = eng_done_r;   assign eng_fail_sub = eng_fail_r;
+
             sd_top u_sd_front (
                 .sys_clk   (sys_clk),
-                .clk_spi   (sys_clk),        // ★ 与改动前逐位相同：三条链原来都接 sys_clk（SCLK 12.5 MHz）
+                // ★★★ 2026-10-17【25 MHz 试过上板，**不可靠**，已回退到 sys_clk = 12.5 MHz】
+                //   接线方式：顶层 `.clk_spi(clk_par)`（100 MHz）⇒ SCLK = 25 MHz。
+                //   上板现象（COM6 遥测）：`load_done` 掉、`a_dbg_px_cnt` 以 3.9 Mpx/s "疯跑"
+                //   （= 11.8 MB/s，**超过 25 MHz 的物理上限 3.1 MB/s**）⇒ 读回数据是错的、
+                //   在反复重试，9 秒后才偶尔成功一次。⇒ 是**卡/走线信号完整性**扛不住，
+                //   不是时序问题（时序报告里 100 MHz 域 SWNS +0.971 ns、0 违例）。
+                //   ★ 想再试的话：把这一根换回 `clk_spi`、顶层接 `clk_par` 即可（两行）。
+                .clk_spi   (sys_clk),        // SCLK = 50/4 = 12.5 MHz（实测 A 轨 379 kpx/s = 1.14 MB/s）
                 .sys_rst_n (sys_rst_n),
 
                 .spi_miso  (spi_miso),
@@ -274,21 +466,28 @@
                 .spi_cs    (spi_cs),
 
                 .read_addr (fe_lba),
-                .read_req  (fe_req),
-                .data_out  (fe_data),
+                .read_req  (fe_req),                .data_out  (fe_data),
                 .read_busy (fe_busy),
                 .read_ok   (fe_ok),
                 .read_done (fe_done),
                 .read_err  (fe_err),
 
                 .led1      (fe_led),
-                .bus_owner (fe_init_done)
+                .bus_owner (fe_init_done),
+                // ★★★ 2026-10-17【CMD18 多块连续读：仿真过、**上板失败**，现已关闭】
+                //   仿真结论（`sim\tb_sd_stream.v` + `sim\sd_card_model.v` 假卡）：
+                //     每块 456 µs → **330 µs**（1.32x），8 块只发 **1 条命令**，
+                //     4608 字节逐字节正确，而且"流式收尾后紧接着单块读"也对。
+                //   上板结论（两次下载，含补 CMD12 那版）：
+                //     图像那一趟**能装完**（遥测：写字数正好 153600 = 640×480/2），
+                //     但**此后所有 SD 读全失败**（`fail=1`、px 被清 0、音频/字幕都装不上）
+                //     ⇒ 这张卡在 SPI 模式下无法被干净地退出多块读（撤 CS 与 CMD12 都试过）。
+                //   ⇒ 现在恒接 0：**行为与改动前逐位相同**（每块一次 CMD17）。
+                //   ★ 想再试：把它改回 `.stream_en(sd_stream_bmp)` 即可（一行）。
+                .stream_en (1'b0)
             );
 
-            // ---- start 分发给谁（★ 用组合的 sd_mode，不是寄存过的）----
-            wire bmp_start = start & (sd_mode == 2'd0);
-            wire wav_start = start & (sd_mode == 2'd1);
-            wire sub_start = start & (sd_mode == 2'd2);
+            // ---- start 分发（★ 声明已前置到上面【切法C】那一段）----
 
             //======================================================================
             //  ★★★ 尺寸 / 长度
@@ -371,6 +570,19 @@
                 .fe_done      (fe_done),
                 .fe_busy      (fe_busy),
                 .fe_err       (fe_err),
+                // ★★★ 2026-10-16【切法C·find_bmp 合流】：查文件走唯一引擎 u_find_eng
+                .eng_ext      (eng_ext_bmp),
+                .eng_skip     (eng_skip_bmp),
+                .eng_start    (eng_start_bmp),
+                .eng_owner    (),
+                .eng_lba_i    (eng_lba_o),
+                .eng_req_i    (eng_req_o),
+                .eng_busy     (eng_busy_o),
+                .eng_done     (eng_done_bmp),
+                .eng_fail     (eng_fail_bmp),
+                .eng_sector   (eng_sec_r),
+                .eng_size     (eng_siz_r),
+                .eng_cluster  (eng_clu_r),
                 .start      (bmp_start),         // ★ 只在装图那一拍给
                 .skip       (skip),
                 .busy       (bmp_busy),
@@ -384,6 +596,8 @@
                 .px_addr    (px_addr),
                 .led_init   (led_init),
                 .sd_ready   (sd_ready),
+                // ★★★ 2026-10-17【CMD18 多块连续读】"正在读像素数据"⇒ 允许连续读多块
+                .seq_rd     (sd_stream_bmp),
                 .dbg_px_cnt     (dbg_px_cnt),
                 .dbg_data_off   (),
                 .dbg_first_px   (dbg_first_px),
@@ -456,6 +670,19 @@
                 .fe_done      (fe_done),
                 .fe_busy      (fe_busy),
                 .fe_err       (fe_err),
+                // ★★★ 2026-10-16【切法C·find_bmp 合流】：查文件走唯一引擎 u_find_eng
+                .eng_ext      (eng_ext_wav),
+                .eng_skip     (eng_skip_wav),
+                .eng_start    (eng_start_wav),
+                .eng_owner    (),
+                .eng_lba_i    (eng_lba_o),
+                .eng_req_i    (eng_req_o),
+                .eng_busy     (eng_busy_o),
+                .eng_done     (eng_done_wav),
+                .eng_fail     (eng_fail_wav),
+                .eng_sector   (eng_sec_r),
+                .eng_size     (eng_siz_r),
+                .eng_cluster  (eng_clu_r),
 
                 .start        (wav_start),       // ★ 只在装音频那一拍给
                 .skip         (skip),
@@ -540,6 +767,19 @@
                 .fe_done        (fe_done),
                 .fe_busy        (fe_busy),
                 .fe_err         (fe_err),
+                // ★★★ 2026-10-16【切法C·find_bmp 合流】：查文件走唯一引擎 u_find_eng
+                .eng_ext        (eng_ext_sub),
+                .eng_skip       (eng_skip_sub),
+                .eng_start      (eng_start_sub),
+                .eng_owner      (),
+                .eng_lba_i      (eng_lba_o),
+                .eng_req_i      (eng_req_o),
+                .eng_busy       (eng_busy_o),
+                .eng_done       (eng_done_sub),
+                .eng_fail       (eng_fail_sub),
+                .eng_sector     (eng_sec_r),
+                .eng_size       (eng_siz_r),
+                .eng_cluster    (eng_clu_r),
 
                 .start          (sub_start),     // ★ 只在装字幕那一拍给
                 .skip           (skip),          // ★ 在 .SUB 里数第几个
