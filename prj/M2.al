@@ -660,6 +660,14 @@
                     <Attr Name="CompileOrder" Val="86"/>
                 </FileInfo>
             </File>
+            <File Path="../b_display/failsafe_pg.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="88"/>
+                </FileInfo>
+            </File>
             <File Path="../b_display/font_rom.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>

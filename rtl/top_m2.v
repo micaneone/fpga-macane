@@ -2036,6 +2036,10 @@ module top_m2 #(
     //    （实测：禁读一段时间后 disp_rd_en 永远是 0、行缓冲再也发不出请求，
     //      屏上只剩底色）。所以改成：**只要有写在跑，就把显示整块复位**，
     //    写完再从干净状态开始 —— 这时图已经在 DRAM 里，一次就读对。
+    // ★★★ 2026-10-21【D2 · B2】兜底页状态（产生逻辑在本文件后面 load_done_latch 之后）
+    wire        fs_on_w;
+    wire [1:0]  fs_state_w;
+
     disp_top u_disp (
         .clk_pix(clk_pix), .clk_par(clk_par), .clk_ser(clk_ser),
         .rst_pix_n(disp_rst_n),
@@ -2076,6 +2080,8 @@ module top_m2 #(
         // ★★★ 2026-10-18【可视化开关进菜单】：行 4 `VISUAL` 的 ON/OFF + 真的关掉可视化层
         //   （disp_top 里用 `~menu_viz_on` 把柱形 mask 和压暗 band 一起门掉）
         .menu_viz_on(viz_s2),
+        // ★★★ 2026-10-21【D2 · B1/B2 兜底页】：没卡 / 坏图 / 装载中 ⇒ 深底自检页（代替米白空屏）
+        .fs_on(fs_on_w), .fs_state(fs_state_w),
         // ★★★ 2026-10-17【音频可视化】音频域那几根（viz 只读旁听）
         .clk_aud(clk_aud), .rst_aud_n(aud_rst_n),
         .aud_viz_vld(aud_dbg_vld), .aud_viz_dout(aud_dbg_dout), .aud_viz_next(aud_dbg_next),
@@ -2209,6 +2215,61 @@ module top_m2 #(
             if (a_fail)      fail_latch      <= 1'b1;
         end
     end
+
+    // ============================================================
+    //  ★★★ 2026-10-21【D2 · B2】兜底页状态机（NO_CARD > BAD_IMG > LOADING > OK）
+    // ------------------------------------------------------------
+    //  三个输入都在 50 MHz 控制域，先在 `clk` 域算成 3 根电平，再各自两级同步到
+    //  `clk_pix`（`failsafe_pg` 在像素流水里，必须同域）。判据：
+    //    · NO_CARD  = !a_sd_ready            —— SD 卡初始化就没过（没卡/接触不良）
+    //    · BAD_IMG  = fail_latch && !load_done_latch
+    //                                       —— 卡在、报过错、而且**一张都没成**
+    //                                          （成功过一张就不再报 BAD：接着显示旧图更合理）
+    //    · LOADING  = !load_done_latch       —— 正在认 FAT / 读 BMP
+    //    · OK       = load_done_latch        —— 已出图 ⇒ fs_on=0，兜底页整个消失
+    //  ★ 上电 0.5 s 内一律按 LOADING 显示：否则 SD 还没初始化完就会先闪一下
+    //    "NO SD CARD"，现场看着像故障（这是 2026-10-19 评审里点过的坑）。
+    // ============================================================
+    wire        fs_nocard_w = ~a_sd_ready;
+    wire        fs_bad_w    = fail_latch & ~load_done_latch;
+    wire        fs_ld_w     = ~load_done_latch;
+
+    reg         fs_nc_s1, fs_nc_s2;
+    reg         fs_bd_s1, fs_bd_s2;
+    reg         fs_ld_s1, fs_ld_s2;
+    reg  [24:0] fs_boot_cnt;                 // 40 MHz 数到 2e7 ≈ 0.5 s 就停
+    reg         fs_boot_done;
+
+    always @(posedge clk_pix or negedge disp_rst_n) begin
+        if (!disp_rst_n) begin
+            fs_nc_s1 <= 1'b0; fs_nc_s2 <= 1'b0;
+            fs_bd_s1 <= 1'b0; fs_bd_s2 <= 1'b0;
+            fs_ld_s1 <= 1'b1; fs_ld_s2 <= 1'b1;
+            fs_boot_cnt  <= 25'd0;
+            fs_boot_done <= 1'b0;
+        end
+        else begin
+            fs_nc_s1 <= fs_nocard_w;  fs_nc_s2 <= fs_nc_s1;
+            fs_bd_s1 <= fs_bad_w;     fs_bd_s2 <= fs_bd_s1;
+            fs_ld_s1 <= fs_ld_w;      fs_ld_s2 <= fs_ld_s1;
+            if (!fs_boot_done) begin
+                if (fs_boot_cnt == 25'd20_000_000) begin
+                    fs_boot_done <= 1'b1;
+                end
+                else begin
+                    fs_boot_cnt <= fs_boot_cnt + 25'd1;
+                end
+            end
+        end
+    end
+
+    // 优先级：NO_CARD > BAD_IMG > LOADING > OK（`fs_boot_done` 前强制 LOADING）
+    assign fs_state_w = (!fs_boot_done) ? 2'd1 :
+                        fs_nc_s2        ? 2'd3 :
+                        fs_bd_s2        ? 2'd2 :
+                        fs_ld_s2        ? 2'd1 : 2'd0;
+    // 只要还在"没出图"的任意一个状态就出兜底页；OK 时整页消失
+    assign fs_on_w    = (fs_state_w != 2'd0);
 
     // ============================================================
     //  ★★★ 2026-10-05：音频上板首试 —— 自产的"装音效 + 播放"命令
@@ -2665,7 +2726,9 @@ module top_m2 #(
         // ★★★ 2026-10-14 深夜【功能·开关切音频】**字段 27 = {15'd0, sel_aud} 保留** ✗
         //   —— 这是上板判读"SW3 拨到第几条音频"的唯一读数（01/02/03/04），
         //     属于本次明确要保留的字段，**一个字不动**。
-        .st_w0(16'd0), .st_w1({12'd0, vol_lv}),
+        // ★★★ 2026-10-21【D2 · B3】字段 25 从常量 0 改成【兜底页状态】(0=OK 1=LOADING 2=BAD_IMG 3=NO_CARD)
+        //   ★ 帧格式/字段数（NV=33）一个字未动；原来这一格就是恒 0，没有别的消费者。
+        .st_w0({14'd0, fs_state_w}), .st_w1({12'd0, vol_lv}),
         .st_w2({{(16-SEL_AUD_W){1'b0}}, sel_aud}),
         // ★★ 2026-10-05：字段 28 从"固定 0"改成【音频链状态位图】
         //   高 8 位：bit7=fail bit6=loaded bit5=音频PLL锁 bit4=busy

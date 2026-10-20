@@ -118,6 +118,13 @@ module disp_top #(
     //   ★ 关掉时：`viz_time` / `viz_freq` 照样在后台跑（只旁听音频，不占 CPU 概念），
     //     打开就能立刻有图 —— 不用等它重新统计一帧。
     input  wire        menu_viz_on,
+    // ★★★ 2026-10-21【D2 · B1/B2 兜底页 / 上电自检页】
+    //   `fs_on`  = 1 时把"最底层背景"换成兜底页（深底 + 三行 ASCII 说明），
+    //              0 时逐位透传 ⇒ 正常出图时零影响（`failsafe_pg` 里整条链被常数传播消掉）。
+    //   `fs_state`：0=OK 1=LOADING 2=BAD_IMG 3=NO_CARD（优先级在顶层定，本模块只画）。
+    //   ★ 插在**合成器之后、可视化/字幕之前** ⇒ 它是最底层，字幕/菜单照样盖在上面。
+    input  wire        fs_on,
+    input  wire [1:0]  fs_state,
     // ★★★ 2026-10-17【音频可视化（队友 viz_top）】：音频域那几根直接从顶层引进来。
     //   `aud_vld/aud_dout/aud_next` 是 `top_aud` 的**只读**握手副本（viz 只旁听，
     //   绝不驱动 aud_next —— 驱动了就是重复消费、音频会断，见队友文档 §5③）。
@@ -448,6 +455,27 @@ module disp_top #(
     assign viz_freq_band  = 1'b0;
     assign viz_freq_color = 24'd0;
 
+    // ★★★ 2026-10-21【D2 · B1】兜底页：把"最底层背景"换掉
+    //   位置：合成器 `px_mix` 之后、`viz_*`/`subtitle_ovl` 之前 ⇒ 它就是最底层，
+    //         上面几层（可视化、字幕、亮度、菜单）照旧往它上面叠。
+    //   ★ 坐标用 `o_dbg_x/o_dbg_y`：它们和 `px_mix` 是**同一个像素**（见下面菜单那段注释），
+    //     所以 `failsafe_pg` 里纯组合画、不打拍，格子边界才和屏幕对齐。
+    //   ★ `fs_on=0` 时 `px_bg` 逐位等于 `px_mix` ⇒ 正常出图与改之前一模一样。
+    wire [15:0] px_bg;
+    failsafe_pg #(
+        .SCALE(2)
+    ) u_failsafe (
+        .clk_pix  (clk_pix),
+        .rst_pix_n(rst_pix_n),
+        .de_in    (de_mix),
+        .x_in     (o_dbg_x),
+        .y_in     (o_dbg_y),
+        .fs_on    (fs_on),
+        .fs_state (fs_state),
+        .px_in    (px_mix),
+        .px_out   (px_bg)
+    );
+
     // ★★★ 2026-10-18【菜单行 4 `VISUAL` = 可视化总开关】
     //   `viz_off` = 关掉时把"柱形遮罩"和"矩形压暗"一起门掉 ⇒ `px_v` 逐位等于 `px_mix`
     //   （= 屏幕上完全看不到可视化，连那块压暗的底也不会留）。
@@ -458,10 +486,10 @@ module disp_top #(
     wire [15:0] viz_c16 = {viz_c24[23:19], viz_c24[15:10], viz_c24[7:3]};
     wire        viz_dim = (viz_hist_band | viz_freq_band) & ~viz_m & ~viz_off;
     //  压暗：565 每个通道各右移 1 位
-    wire [15:0] viz_dim16 = {1'b0, px_mix[15:12], 1'b0, px_mix[10:6], 1'b0, px_mix[4:1]};
+    wire [15:0] viz_dim16 = {1'b0, px_bg[15:12], 1'b0, px_bg[10:6], 1'b0, px_bg[4:1]}; // ★ D2：压暗的底跟着兜底页
     wire [15:0] px_v = viz_m   ? viz_c16
                      : viz_dim ? viz_dim16
-                     :           px_mix;
+                     :           px_bg;   // ★ D2：兜底页 = 最底层
 
     subtitle_ovl u_sub (
         .clk_pix(clk_pix), .rst_pix_n(rst_pix_n),
