@@ -1416,17 +1416,15 @@ module top_m2 #(
 //    re-trigger forever).
 // ============================================================
 reg         sw4a_s1, sw4a_s2;
-reg  [16:0] swa_dbnc;          // 1.5 ms @50 MHz 消抖计数
+reg  [16:0] swa_dbnc;          // 1.5 ms @50 MHz 消抖
 reg         swa_lev;           // 消抖后的开关电平
-reg         swa_d;             // 上一拍的 swa_lev（判变化）
-reg  [27:0] arm_cnt;           // 上电武装计数：2 s 内不认变化
-reg  [23:0] arst_cnt;          // 复位脉宽：16 ms
+reg         swa_d;             // 上一拍电平（判变化）
+reg  [27:0] arm_cnt;           // 上电武装：2 s 内不认变化
 wire        swa_raw = sw4a_s2;
-wire        arm_ok  = (arm_cnt >= 28'd100_000_000);   // 2 s
+wire        arm_ok  = (arm_cnt >= 28'd100_000_000);
 wire        swa_chg = arm_ok & (swa_lev ^ swa_d);
-wire        alert_rst_pulse = (arst_cnt != 24'd0);
+wire        a_alert_rst_pend;  // 等 A 轨空闲后的报警复位请求（下面驱动）
 
-// 第一段：两级同步 + 1.5 ms 消抖 + 2 s 武装
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
         sw4a_s1  <= 1'b0;
@@ -1440,15 +1438,15 @@ always @(posedge clk or negedge rst_n) begin
         sw4a_s1 <= sw4;
         sw4a_s2 <= sw4a_s1;
         if (!arm_ok) begin
-            arm_cnt <= arm_cnt + 28'd1;
-            swa_lev <= swa_raw;      // 武装期间直接跟随，避免上电误判
-            swa_d   <= swa_raw;
+            arm_cnt  <= arm_cnt + 28'd1;
+            swa_lev  <= swa_raw;
+            swa_d    <= swa_raw;
             swa_dbnc <= 17'd0;
         end
         else begin
             if (swa_raw != swa_lev) begin
                 if (swa_dbnc >= 17'd74_999) begin
-                    swa_lev  <= swa_raw;     // 稳住 1.5 ms 才认
+                    swa_lev  <= swa_raw;
                     swa_dbnc <= 17'd0;
                 end
                 else swa_dbnc <= swa_dbnc + 17'd1;
@@ -1459,14 +1457,7 @@ always @(posedge clk or negedge rst_n) begin
     end
 end
 
-// 第二段：电平变化 -> 16 ms 复位脉冲（本段只受 rst_n 复位，不会被自己产生的复位清掉）
-always @(posedge clk or negedge rst_n) begin
-    if (!rst_n) arst_cnt <= 24'd0;
-    else if (swa_chg)                      arst_cnt <= 24'd800_000;
-    else if (arst_cnt != 24'd0)            arst_cnt <= arst_cnt - 24'd1;
-end
-
-wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst & ~alert_rst_pulse;
+wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     // ============================================================
 
@@ -1566,7 +1557,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst & ~alert_rst_pulse;
 
             // ② 复位请求：到点重试 **或** 看门狗判定吊死（C1b）
 
-            if (a_stall || (sd_need_retry && (sd_retry_cnt >= SD_RETRY_TICKS))) begin
+            if (a_stall || a_alert_rst_pend || (sd_need_retry && (sd_retry_cnt >= SD_RETRY_TICKS))) begin
 
                 a_recover     <= 1'b1;
 
@@ -1607,6 +1598,15 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst & ~alert_rst_pulse;
     end
 
     // A 轨专用复位：全设计复位 + 本模块的自动重试脉冲
+
+    // ============================================================
+    //      // 2026-10-21: a_recover 落下那一拍 = A 轨重新初始化完成待装载 -> 再要一次装图
+    reg  a_rec_d;
+    always @(posedge clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) a_rec_d <= 1'b0;
+        else            a_rec_d <= a_recover;
+    end
+    wire a_rec_fall = a_rec_d & ~a_recover;
 
     wire a_rst_n = sys_rst_n & ~a_recover;
 
@@ -2318,6 +2318,38 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst & ~alert_rst_pulse;
                                         //   的脉冲（输入 = `key1 | menu_on`）⇒ 菜单打开期间不计数。
 
     wire        req_pend_w;             // ★ 探针：转场请求挂起中
+
+
+//  2026-10-21 ALARM = SOFT RESET (v3, deferred until the A track is idle)
+    //    Flipping SW4 no longer resets immediately: it only arms `rst_pend`.
+    //    The pulse fires when the loader is between transactions
+    //    (!a_busy && !req_pend_w) and at least 2 s have passed since the last one.
+    //    Reset mid-SD-transaction is what left the card un-initialised and
+    //    produced the "hang on flip" the user reported.
+    // ============================================================
+    reg  [23:0] arst_cnt;      // 16 ms 脉冲宽度（只受 rst_n 复位）
+    reg         rst_pend;      // 有一次待执行的报警复位
+    reg  [26:0] rst_gap;       // 两次复位之间的最小间隔 2 s
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            arst_cnt <= 24'd0;
+            rst_pend <= 1'b0;
+            rst_gap  <= 27'd0;
+        end
+        else begin
+            if (rst_gap != 27'd0) rst_gap <= rst_gap - 27'd1;
+            if (swa_chg) rst_pend <= 1'b1;
+            if (arst_cnt != 24'd0)
+                arst_cnt <= arst_cnt - 24'd1;
+            else if (rst_pend && !a_busy && !req_pend_w && (rst_gap == 27'd0)) begin
+                rst_pend <= 1'b0;
+                arst_cnt <= 24'd800_000;      // 16 ms @50 MHz
+                rst_gap  <= 27'd100_000_000;  // 2 s
+            end
+        end
+    end
+    assign a_alert_rst_pend = (arst_cnt == 24'd1);
 
 
 
@@ -6655,7 +6687,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst & ~alert_rst_pulse;
 
             img_hold <= img_load_pulse | (img_hold & ~(a_load_done | a_fail));
 
-            if (alert_rise | alert_fall)
+            if (alert_rise | alert_fall | a_rec_fall)
 
                 img_req_pend <= 1'b1;
 
