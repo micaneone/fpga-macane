@@ -573,7 +573,8 @@
           .start      (f_start),
           .cmd        (1'b0),           // 0 = 找文件
           .skip       (skip),
-          .name_sel   (name_sel),       // ★ 2026-10-20：0 = AD 类，1 = MAP 类
+          .name_sel   (name_sel),
+        .name_inv   (1'b0),           // ★ 2026-10-21：名字过滤统一在 top_a 的共享引擎上做       // ★ 2026-10-20：0 = AD 类，1 = MAP 类
           .in_cluster (32'd0),          // cmd=0 用不到
 
           .busy       (),               // 不用

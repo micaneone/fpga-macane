@@ -67,6 +67,11 @@ module stub_ctrl #(
     //   所以这里不需要额外判据 —— 落进来的脉冲一律按"换下一张"处理。
     //   ★ 按键那条路照旧保留（本模块内部一个字没删），只是顶层不再喂按键了。
     input  wire        adv_req,
+    // ★ 2026-10-21【报警换图】：为 1 时**不走预装的快速路**，强制真去 SD 装一次。
+    //   为什么需要：轮播靠后台槽预装「下一张」，受理请求时 need_load 会变 0
+    //   ⇒ 转场直接拿后台槽那张老图，看起来就是"没换图"。报警要的是指定名字的图，
+    //   后台槽里永远不会有它，必须强制真装载。和 adv_req 同拍有效。
+    input  wire        force_load,
     input  wire        sd_ready,       // A：SD 卡初始化完成
     input  wire        a_busy,         // A：正在装载（装载期间不再触发）
     input  wire        hold,           // 1 = 别触发（B 自测图正在写大槽 0）
@@ -232,7 +237,7 @@ module stub_ctrl #(
                 // ★★★ 预装：这一拍把"本次请求还需要装吗"定下来 ——
                 //   后台槽已经装好了（pf_ready）或正在装（load_inflight）⇒ 不用装，
                 //   像素域那边会走快速路直接进 FX。
-                need_load <= ~(pf_ready | load_inflight);
+                need_load <= ~(pf_ready | load_inflight) | force_load;
                 // ★ 预装的门栓：受理过一次请求之后才允许预装（竞态 ③）
                 pf_armed  <= 1'b1;
                 // ★ 给顶层的一拍脉冲：音效挂它（按键那一下响，不是预装那一刻响）

@@ -118,6 +118,7 @@ set_pin_assignment	{ HDMI_DDC_SDA }	{ LOCATION = R2; IOSTANDARD = LVCMOS33; DRIV
 
 # ---------- 备查：本工程用不到的其它外设引脚 ----------
 #   串口接收：uart_rx = F12
-#   蜂鸣器：spk = H11
+set_pin_assignment	{ spk }	{ LOCATION = H11; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+#   蜂鸣器：spk = H11（2026-10-21 已接上：报警时 2 kHz 断续）
 #   音频（WM8731）：aud_bclk=F15  aud_xck=E15  aud_daclrck=J16  aud_dacdat=G14
 #   ★ 片内 SDRAM 是 SIP 封装的，没有引脚、不需要约束。

@@ -61,6 +61,7 @@
       input             cmd,
       input      [3:0]  skip,
       input             name_sel,       // ★ 0 = 找 NAME0（"AD"），1 = 找 NAME1（"MAP"）
+      input             name_inv,       // ★ 2026-10-21：1 = 反选（要求不以 NAME1 开头）
       input      [31:0] in_cluster,
       // ---- 状态回报 ----
       output reg        busy,
@@ -93,6 +94,7 @@
       output [3:0]      eng_skip,       // → 引擎：本链的 skip（引擎在 start 那拍锁存）
       output            eng_name_en,    // ★ → 引擎：本链要不要比文件名（= NAME_EN，常数）
       output            eng_name_sel,   // ★ → 引擎：0 = AD 类，1 = MAP 类（NAME_EN=0 时为 0）
+      output            eng_name_inv,   // ★ 2026-10-21 → 引擎：1 = 反选
       output            eng_start,      // → 引擎：本链要查文件（= 原 f_start 的语义）
       output            eng_owner,      // → 引擎：1 = 本链当家（= fe_owner）
       input      [31:0] eng_lba_i,      // ← 引擎：引擎自己算的扇区地址
@@ -112,6 +114,7 @@
       // ★ NAME_EN=0 ⇒ 恒 0，引擎里名字比较整段被综合掉（音频/字幕两条链 0 LUT）
       assign eng_name_en  = NAME_EN ? 1'b1 : 1'b0;
       assign eng_name_sel = NAME_EN ? name_sel : 1'b0;
+    assign eng_name_inv = NAME_EN ? name_inv : 1'b0;
       assign eng_start = start;
       assign eng_owner = fe_owner;
 
@@ -230,6 +233,7 @@
       input      [23:0] target_ext,     // ★ 要找的扩展名（合并后由请求方带）
       input             name_en,        // ★ 1 = 还要比文件名（只有图像链会拉高）
       input             name_sel,       // ★ 0 = NAME0（"AD"），1 = NAME1（"MAP"）
+      input             name_inv,       // ★ 2026-10-21：1 = 反选（要求【不以】NAME1 开头）
       input             cmd,
       input      [3:0]  skip,
       input      [31:0] in_cluster,
@@ -277,6 +281,7 @@
       reg [23:0] ext_r;          // ★ 切法C：start 那拍锁存请求方的扩展名
       reg        name_en_r;      // ★ 2026-10-20：start 那拍锁存"要不要比名字"
       reg        name_sel_r;     // ★ 2026-10-20：start 那拍锁存"AD 类 / MAP 类"
+    reg        name_inv_r;     // ★ 2026-10-21：start 那拍锁存"要不要反选"
       reg        name_ok;        // ★ 2026-10-20：目录项第 0~7 字节的名字前缀比较结果
 
       reg [9:0]  byte_cnt;       // 扇区内字节计数 0~511
@@ -465,6 +470,7 @@
                       ext_r     <= target_ext;   // ★ 切法C：本拍锁存请求方的扩展名
                       name_en_r <= name_en;      // ★ 2026-10-20：锁存"本链要不要比名字"
                       name_sel_r<= name_sel;     // ★ 2026-10-20：锁存"AD 类 / MAP 类"
+        name_inv_r<= name_inv;     // ★ 2026-10-21
                       owner_r   <= owner;        // ★ 切法C：本拍锁存"发起者当家"
                       hit_cnt   <= 4'd0;
                       dir_sec   <= 8'd0; 
@@ -558,7 +564,7 @@
 
                           if (byte_cnt[4:0] == 5'd11)          // 属性字节
                               entry_hit <= entry_live && ext_ok &&
-                                           (!name_en_r || name_ok) &&
+                                           (!name_en_r || (name_inv_r ? !name_ok : name_ok)) &&
                                            ((sd_data & 8'h18) == 8'h00);
                               // 0x18 一次排除 LFN(0x0F)/卷标(0x08)/目录(0x10)
 

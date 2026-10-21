@@ -94,11 +94,15 @@ module menu_ovl_cn #(
     localparam integer G1 = CELL;        // 24
     localparam integer G2 = CELL * 2;    // 48
     localparam integer G3 = CELL * 3;    // 72
-    localparam integer GW = CELL * 4;    // 96（四个字格总宽）
+    localparam integer G4 = CELL * 4;    // 96
+    localparam integer G5 = CELL * 5;    // 120
+    localparam integer G6 = CELL * 6;    // 144
+    localparam integer GW = CELL * 7;    // 168（七个字格：标签 2 + 空 1 + 数值最多 4）
 
     // 汉字序号（和 font_cn.v 的字形表一致）
     localparam [4:0] CH_BLANK = 5'd31;   // 字形表里没有 ⇒ 全 0 ⇒ 空
     localparam [4:0] CH_0     = 5'd0;
+    localparam [4:0] CH_PCT   = 5'd17;   // '%'（2026-10-21：音量/亮度按百分比显示）
 
     // ============================================================
     //  1. 打一拍：坐标跟着数据一起走
@@ -147,14 +151,20 @@ module menu_ovl_cn #(
     wire in_gly_y = (ry < CELL);
     wire in_gly   = in_gly_x && in_gly_y;
 
-    wire [1:0] gx = (rx >= G3) ? 2'd3 :
-                    (rx >= G2) ? 2'd2 :
-                    (rx >= G1) ? 2'd1 : 2'd0;
+    wire [2:0] gx = (rx >= G6) ? 3'd6 :
+                    (rx >= G5) ? 3'd5 :
+                    (rx >= G4) ? 3'd4 :
+                    (rx >= G3) ? 3'd3 :
+                    (rx >= G2) ? 3'd2 :
+                    (rx >= G1) ? 3'd1 : 3'd0;
 
-    wire [4:0] lx = (gx == 2'd0) ? rx[4:0] :
-                    (gx == 2'd1) ? (rx - G1) :
-                    (gx == 2'd2) ? (rx - G2) :
-                                   (rx - G3);
+    wire [4:0] lx = (gx == 3'd0) ? rx[4:0] :
+                    (gx == 3'd1) ? (rx - G1) :
+                    (gx == 3'd2) ? (rx - G2) :
+                    (gx == 3'd3) ? (rx - G3) :
+                    (gx == 3'd4) ? (rx - G4) :
+                    (gx == 3'd5) ? (rx - G5) :
+                                   (rx - G6);
 
     // 字形 ROM 行序是"自下而上"（row=0 在屏幕最下面）
     wire [4:0] gy = 5'd23 - ry[4:0];
@@ -172,28 +182,38 @@ module menu_ovl_cn #(
         endcase
     end
 
-    // 数值：0..5 / 1..4 / 0..15 / 0..15 ⇒ 十位 + 个位（>9 才画十位，省一位除法）
-    reg [4:0] d_tens, d_ones;
-    reg [4:0] val;
+    // 数值：缩放/音轨 = 一位数字；音量/亮度 = 百分比（0% / 50% / 100%）
+    //   ★ 2026-10-21：音量、亮度改成 0..10 档、每档 10%，显示成 "50%"
+    //   字格 0/1 = 标签，2 = 固定空白（分隔），3..6 = 数值右对齐（最右 6 格放 '%'）
+    //   ⇒ "0%" 占 5/6、"50%" 占 4/5/6、"100%" 占 3/4/5/6，不用除法（档位就是十位数）
+    reg [4:0] v_c3, v_c4, v_c5, v_c6;
+    reg [4:0] lv10;
     always @(*) begin
+        v_c3 = CH_BLANK; v_c4 = CH_BLANK; v_c5 = CH_BLANK; v_c6 = CH_BLANK;
         case (row_now)
-            3'd0: val = {2'b00, zoom_lv};                    // 0..5
-            3'd1: val = {2'b00, sel_aud} + 5'd1;             // 1..4
-            3'd2: val = {1'b0, vol_lv};                      // 0..15
-            default: val = {1'b0, bri_lv};                   // 0..15
+            3'd0: v_c6 = CH_0 + {2'b00, zoom_lv};              // 0..5 适配/1x/1.5x/2x/3x/4x
+            3'd1: v_c6 = CH_0 + ({2'b00, sel_aud} + 5'd1);     // 1..4 第几条音轨
+            default: begin
+                lv10 = (row_now == 3'd2) ? {1'b0, vol_lv} : {1'b0, bri_lv};   // 0..10
+                v_c6 = CH_PCT;
+                v_c5 = CH_0;                                   // 个位恒 0（10% 一档）
+                if (lv10 == 5'd10) begin                       // 100%
+                    v_c3 = CH_0 + 5'd1;
+                    v_c4 = CH_0;
+                end
+                else if (lv10 != 5'd0) begin                   // 10%..90%
+                    v_c4 = CH_0 + lv10;
+                end
+            end
         endcase
-        if (val >= 5'd10) begin
-            d_tens = CH_0 + 5'd1;            // '1'（最大 15）
-            d_ones = CH_0 + (val - 5'd10);
-        end else begin
-            d_tens = CH_BLANK;
-            d_ones = CH_0 + val;
-        end
     end
 
-    wire [4:0] g_ch = (gx == 2'd0) ? lab0 :
-                      (gx == 2'd1) ? lab1 :
-                      (gx == 2'd2) ? d_tens : d_ones;
+    wire [4:0] g_ch = (gx == 3'd0) ? lab0 :
+                      (gx == 3'd1) ? lab1 :
+                      (gx == 3'd2) ? CH_BLANK :
+                      (gx == 3'd3) ? v_c3 :
+                      (gx == 3'd4) ? v_c4 :
+                      (gx == 3'd5) ? v_c5 : v_c6;
 
     // ============================================================
     //  4. 字形 ROM

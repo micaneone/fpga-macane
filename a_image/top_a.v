@@ -111,6 +111,8 @@
             //   ★ 三条链的 `skip` 仍然只用一根 —— 顶层本来就按 sd_mode 先三选一，
             //     拆成三根在这里是纯冗余（交付说明里那三根是给"旧底座"写的）。
             input         bmp_name_sel,
+    // ★ 2026-10-21：1 = 只认 EMG*（报警态）/ 0 = 排除 EMG*（正常态）——全局名字过滤
+    input         name_emg_only,
 
             // ---- 图像专用 ----
             input  [2:0]  use_slot,         // ★ 3 位：装到第几个槽（0 ~ SLOT_NUM-1）
@@ -437,7 +439,7 @@
             //==================================================================
             //  ★ FAT/目录索引引擎：全工程唯一一份
             //==================================================================
-            find_bmp_eng u_find_eng (
+            find_bmp_eng #(.NAME1(64'h454D_4700_0000_0000)) u_find_eng (   // NAME1 = 'E','M','G'
                 .sys_clk         (sys_clk),
                 .sys_rst_n       (sys_rst_n),
 
@@ -453,8 +455,12 @@
                 .start           (eng_start),
                 .owner           (eng_owner_sel),
                 .target_ext      (eng_ext_sel),
-                .name_en         (eng_name_en_sel),   // ★ 2026-10-20：只有装图那笔要比名字
-                .name_sel        (eng_name_sel_sel),  // ★ 2026-10-20：0 = AD 类，1 = MAP 类
+                // ★★★ 2026-10-21【全局名字过滤】三条链共用一个引擎 ⇒ 名字比较统一在这里做。
+                //   name_emg_only=1（报警态）⇒ 只认 EMG*；=0（正常态）⇒ 排除 EMG*。
+                //   于是"正常态永远转不到报警素材"是硬件保证，不靠软件让路。
+                .name_en         (1'b1),
+                .name_sel        (1'b1),               // 比 NAME1 = "EMG"
+                .name_inv        (~name_emg_only),
                 .cmd             (1'b0),          // ★ 三条链都只找文件
                 .skip            (eng_skip_sel),
                 .in_cluster      (32'd0),         // cmd=0 用不到
