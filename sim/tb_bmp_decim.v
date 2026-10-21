@@ -38,9 +38,13 @@ module tb_bmp_decim;
     reg [7:0] mem [0:MAXB-1];
     integer   filesz;
 
-    // 造文件：W x H，24bpp，data_off = 54，每行 padding 到 4 字节
+    // 造文件：W x H，24bpp，data_off = DOFF（默认 54），每行 padding 到 4 字节
+    //   ★★ DOFF 是可变的：C4 的"错行雷"要求"某行最后一个字节正好是扇区最后一字节"，
+    //      即 (DOFF + k*stride + 3W - 1) mod 512 == 511。标准 54 字节头永远凑不出来
+    //      （54+3W*k 恒 ≡ 54，行尾恒 ≡ 53），所以必须把 data_off 挪成 512 的倍数才能撞上。
     integer k, r, c;
     integer stride;
+    integer DOFF;
     task build_bmp;
         input integer W;
         input integer H;
@@ -49,7 +53,7 @@ module tb_bmp_decim;
             // ---- 头 ----
             mem[0] = 8'h42; mem[1] = 8'h4D;             // 'B','M'
             mem[2]  = 8'd0; mem[3]  = 8'd0; mem[4]  = 8'd0; mem[5]  = 8'd0;
-            mem[10] = 8'd54; mem[11] = 8'd0; mem[12] = 8'd0; mem[13] = 8'd0;
+            mem[10] = DOFF[7:0]; mem[11] = DOFF[15:8]; mem[12] = 8'd0; mem[13] = 8'd0;
             mem[14] = 8'd40; mem[15] = 8'd0; mem[16] = 8'd0; mem[17] = 8'd0;
             mem[18] = W[7:0];   mem[19] = W[15:8];   mem[20] = 8'd0; mem[21] = 8'd0;
             mem[22] = H[7:0];   mem[23] = H[15:8];   mem[24] = 8'd0; mem[25] = 8'd0;
@@ -59,15 +63,15 @@ module tb_bmp_decim;
             stride = ((W * 3 + 3) >> 2) << 2;
             for (r = 0; r < H; r = r + 1) begin
                 for (c = 0; c < W; c = c + 1) begin
-                    mem[54 + r*stride + c*3 + 0] = r[7:0];      // B = 行号
-                    mem[54 + r*stride + c*3 + 1] = c[7:0];      // G = 列号
-                    mem[54 + r*stride + c*3 + 2] = 8'hA5;       // R
+                    mem[DOFF + r*stride + c*3 + 0] = r[7:0];      // B = 行号
+                    mem[DOFF + r*stride + c*3 + 1] = c[7:0];      // G = 列号
+                    mem[DOFF + r*stride + c*3 + 2] = 8'hA5;       // R
                 end
                 for (k = W*3; k < stride; k = k + 1) begin
-                    mem[54 + r*stride + k] = 8'hFF;             // 行尾 padding
+                    mem[DOFF + r*stride + k] = 8'hFF;             // 行尾 padding
                 end
             end
-            filesz = 54 + H*stride;
+            filesz = DOFF + H*stride;
         end
     endtask
 
@@ -251,8 +255,8 @@ module tb_bmp_decim;
                 @(posedge clk);
                 tmo = tmo + 1;
             end
-            $display("W=%0d H=%0d  lg=%0d  img=%0dx%0d (want %0dx%0d)  px=%0d (want %0d)  bad=%0d  done=%0b fail=%0b",
-                     W, H, lg_exp, img_width, img_height, wd_exp, hd_exp,
+            $display("W=%0d H=%0d  lg=%0d  doff=%0d  img=%0dx%0d (want %0dx%0d)  px=%0d (want %0d)  bad=%0d  done=%0b fail=%0b",
+                     W, H, lg_exp, DOFF, img_width, img_height, wd_exp, hd_exp,
                      n_px, wd_exp*hd_exp, n_bad, done, fail);
             $display("        读了 %0d 个扇区（全读要 %0d 个）⇒ 读量 %0d%%",
                      n_sec, (filesz+511)/512, (n_sec*100)/((filesz+511)/512));
@@ -264,6 +268,7 @@ module tb_bmp_decim;
 
     initial begin
         $display("=== tb_bmp_decim start ===");
+        DOFF = 54;
         run_case(40, 30);        // 不抽（无 padding）
         run_case(256, 1300);     // ÷2（行宽 768B ≈ 真实 1536 宽的情形）
         run_case(256, 2500);     // ÷4
@@ -277,6 +282,14 @@ module tb_bmp_decim;
         //   上板表现就是"换张图整体错行"（1536×1152 正是 W*3=4608=9*512）。
         run_case(512, 100);
         run_case(1024, 60);
+        // ★★★ 2026-10-21【C4 定点爆破】把 data_off 挪到 512 的倍数，
+        //   让"每行最后一个字节"正好是扇区最后一个字节（(512+1536k+1535) mod 512 == 511），
+        //   并且用 H=1300 逼出抽稀（keep_rn=0 走 seek 分支）——这是那个竞态唯一的触发窗口。
+        //   标准 54 字节头永远凑不出来：54+1536k 恒 ≡ 54，行尾恒 ≡ 53，
+        //   所以这个雷在真实素材上是"理论存在、实际不可触发"。
+        DOFF = 512;
+        run_case(512, 1300);
+        DOFF = 54;
         $display("=== DONE ===");
         $finish;
     end
