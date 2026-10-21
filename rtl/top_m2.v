@@ -1403,7 +1403,70 @@ module top_m2 #(
 
     // 全设计的复位：引脚复位 + PLL 稳定确认（已锁存）+ 软复位
 
-    wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
+    // ============================================================
+//  2026-10-21 ALARM = SOFT RESET (user decision)
+//    The alarm switch (SW4, 2-stage synchronised below) toggles:
+//      * a 16 ms soft-reset pulse is issued to the WHOLE design;
+//      * after the reset, alert_on is simply the switch level, so the image /
+//        audio / subtitle chains all pick skip=0 (EMG*) while the switch is on.
+//    Why: incremental reload never worked reliably (sgmii 竞争 + 缓存态),
+//    while "boot with the switch already on" was proven to show EMG.BMP.
+//    This generator is clocked by clk and reset ONLY by rst_n, so it cannot be
+//    reset by the very pulse it produces (otherwise it would lose the pulse and
+//    re-trigger forever).
+// ============================================================
+reg         sw4a_s1, sw4a_s2;
+reg  [16:0] swa_dbnc;          // 1.5 ms @50 MHz 消抖计数
+reg         swa_lev;           // 消抖后的开关电平
+reg         swa_d;             // 上一拍的 swa_lev（判变化）
+reg  [27:0] arm_cnt;           // 上电武装计数：2 s 内不认变化
+reg  [23:0] arst_cnt;          // 复位脉宽：16 ms
+wire        swa_raw = sw4a_s2;
+wire        arm_ok  = (arm_cnt >= 28'd100_000_000);   // 2 s
+wire        swa_chg = arm_ok & (swa_lev ^ swa_d);
+wire        alert_rst_pulse = (arst_cnt != 24'd0);
+
+// 第一段：两级同步 + 1.5 ms 消抖 + 2 s 武装
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        sw4a_s1  <= 1'b0;
+        sw4a_s2  <= 1'b0;
+        swa_dbnc <= 17'd0;
+        swa_lev  <= 1'b0;
+        swa_d    <= 1'b0;
+        arm_cnt  <= 28'd0;
+    end
+    else begin
+        sw4a_s1 <= sw4;
+        sw4a_s2 <= sw4a_s1;
+        if (!arm_ok) begin
+            arm_cnt <= arm_cnt + 28'd1;
+            swa_lev <= swa_raw;      // 武装期间直接跟随，避免上电误判
+            swa_d   <= swa_raw;
+            swa_dbnc <= 17'd0;
+        end
+        else begin
+            if (swa_raw != swa_lev) begin
+                if (swa_dbnc >= 17'd74_999) begin
+                    swa_lev  <= swa_raw;     // 稳住 1.5 ms 才认
+                    swa_dbnc <= 17'd0;
+                end
+                else swa_dbnc <= swa_dbnc + 17'd1;
+            end
+            else swa_dbnc <= 17'd0;
+            swa_d <= swa_lev;
+        end
+    end
+end
+
+// 第二段：电平变化 -> 16 ms 复位脉冲（本段只受 rst_n 复位，不会被自己产生的复位清掉）
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) arst_cnt <= 24'd0;
+    else if (swa_chg)                      arst_cnt <= 24'd800_000;
+    else if (arst_cnt != 24'd0)            arst_cnt <= arst_cnt - 24'd1;
+end
+
+wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst & ~alert_rst_pulse;
 
     // ============================================================
 
@@ -1503,7 +1566,7 @@ module top_m2 #(
 
             // ② 复位请求：到点重试 **或** 看门狗判定吊死（C1b）
 
-            if (a_stall || a_alert_rst || (sd_need_retry && (sd_retry_cnt >= SD_RETRY_TICKS))) begin
+            if (a_stall || (sd_need_retry && (sd_retry_cnt >= SD_RETRY_TICKS))) begin
 
                 a_recover     <= 1'b1;
 
@@ -1993,11 +2056,7 @@ module top_m2 #(
 
     // ★ 2026-10-21：报警触发从 SW1(C8) 换到 SW4(C5)。
     //   板上若另有丝印 BUZ/SW 的开关（不在 SW1~SW4 内），把下面 sw4a_s1 的采样源换成那个引脚即可。
-    reg sw4a_s1, sw4a_s2;
-    always @(posedge clk or negedge sys_rst_n) begin
-        if (!sys_rst_n) begin sw4a_s1 <= 1'b0; sw4a_s2 <= 1'b0; end
-        else            begin sw4a_s1 <= sw4;  sw4a_s2 <= sw4a_s1; end
-    end
+    //   · SW4 的两级同步已挪到 sys_rst_n 之前（报警 = 软复位，见那里的说明）
     //   · 报警解除 ⇒ 重装回用户选的那一条（`sel_aud`）
 
     //   · 报警期间音量强制满档（`{4'hF, 4'hF}`），现场不会"报警声太小听不见"
@@ -2512,7 +2571,7 @@ module top_m2 #(
 
         if (!rst_n) begin
 
-            vol_lv <= 4'd5;                        // ★ 2026-10-21：上电 50%
+            vol_lv <= 4'd0;                        // ★ 2026-10-21：上电 0%（用户要求：开机静音）
 
         end
 
@@ -2880,7 +2939,7 @@ module top_m2 #(
 
             aud_s1  <= 2'd0; aud_s2  <= 2'd0;
 
-            vol_s1  <= 4'd5;  vol_s2 <= 4'd5;    // ★ 2026-10-21：上电 50%（原来是满档 15）
+            vol_s1  <= 4'd0;  vol_s2 <= 4'd0;    // ★ 2026-10-21：上电 0%（开机静音）
 
             bri_s1  <= 4'd10; bri_s2 <= 4'd10;   // ★ 2026-10-21：上电 100%（10 = 原样）
 
