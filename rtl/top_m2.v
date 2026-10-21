@@ -942,6 +942,61 @@ module top_m2 #(
     //   ★ 纯组合：只在按 KEY3 那一拍被采样；它本身不产生脉冲、不影响任何既有信号。
     assign menu_dir = MENU_UP_ON_1 ? sw1_lvl2 : ~sw1_lvl2;
 
+    // ============================================================
+    //  ★★★ 2026-10-21【D5 · S1 插播态】SW1 当"干接点"：拨上 = 报警
+    // ------------------------------------------------------------
+    //  语义（对应报告里的"商显 + 应急插播"）：
+    //    · SW1 电平 = 1  ⇒ 立刻进报警态（`alert_on = 1`），**当帧生效**
+    //    · SW1 电平 = 0  ⇒ 不是立刻退，**保持 10 s** 再恢复
+    //      （现场规矩：信号抖动/短暂断开不能打断正在播的疏散提示）
+    //
+    //  ★ 报警期间只做两件事，不动装载、不动 SDRAM：
+    //    ① `alert_on` 送给 disp_top ⇒ alert_ovl 叠"红框 + 1 Hz 红闪"
+    //    ② 压低 `adv_req_w`（轮播请求）⇒ 报警时**不换图**，
+    //       因为一次装载要 0.8 s 且遮蔽显示，插播必须让位
+    //
+    //  ★ SW1 同时还是菜单方向位（`menu_dir`）：平时不拨，报警时才拨；
+    //    菜单里要调方向就先断开 SW1（= 退出报警态）。这是单开关的取舍，
+    //    已写进 03 计划表的"交互重排"，不再另加引脚。
+    // ============================================================
+    localparam integer ALERT_HOLD_MS    = 10000;
+    localparam [28:0]  ALERT_HOLD_TICKS = ALERT_HOLD_MS * 50_000;   // 500,000,000
+
+    reg        alert_on;
+    reg [28:0] alert_hold_cnt;
+
+    always @(posedge clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin
+            alert_on       <= 1'b0;
+            alert_hold_cnt <= 29'd0;
+        end
+        else if (sw1_lvl2) begin
+            alert_on       <= 1'b1;
+            alert_hold_cnt <= 29'd0;      // 只要接点闭合就一直报
+        end
+        else if (alert_on) begin
+            if (alert_hold_cnt >= ALERT_HOLD_TICKS)
+                alert_on <= 1'b0;         // 断开满 10 s ⇒ 恢复
+            else
+                alert_hold_cnt <= alert_hold_cnt + 29'd1;
+        end
+    end
+
+    // ---- 报警标志 → 像素域（两级；alert_ovl 在 clk_pix 域）----
+    //   ★ 复位用 sys_rst_n：`disp_rst_n` 在下面才声明，而且它会在装载期间被拉低，
+    //     拿它复位会让"报警中换图"把红框清掉。跨域异步复位在这里只作用于慢变量，安全。
+    reg alert_s1, alert_s2;
+    always @(posedge clk_pix or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin
+            alert_s1 <= 1'b0;
+            alert_s2 <= 1'b0;
+        end
+        else begin
+            alert_s1 <= alert_on;
+            alert_s2 <= alert_s1;
+        end
+    end
+
     // ★★ 2026-10-05：音频域的复位（音频 PLL 也锁上才放开）—— 到这里 sys_rst_n 已经声明过了
     assign aud_rst_n = sys_rst_n & pll_aud_locked;
 
@@ -1065,7 +1120,7 @@ module top_m2 #(
     //      （实测 field28 变成 6763：字幕 loaded=0/fail=1）。
     //      默认（`CARO_ON_AT_BOOT=0`）本来就不会开机轮播，这一条是防止用户一起机就按 KEY3。
     wire        caro_idle = ~(a_busy | ac2 | req_pend_w) & (sub_loaded | sub_fail);
-    wire        adv_req_w = auto_caro & caro_tick & caro_idle;
+    wire        adv_req_w = auto_caro & caro_tick & caro_idle & ~alert_on;   // D5: no carousel while alarm
 
     always @(posedge clk or negedge sys_rst_n) begin
         if (!sys_rst_n) begin
@@ -2159,6 +2214,8 @@ module top_m2 #(
         // ★★★ 2026-10-21【D2 · B1/B2 兜底页】：没卡 / 坏图 / 装载中 ⇒ 深底自检页（代替米白空屏）
         .fs_on(fs_on_w), .fs_state(fs_state_w),
         .fs_hint(fs_hint_w),
+        // ★★★ 2026-10-21【D5 · S1 插播态】报警标志（像素域同步后的电平）
+        .alert_on(alert_s2),
         // ★★★ 2026-10-17【音频可视化】音频域那几根（viz 只读旁听）
         .clk_aud(clk_aud), .rst_aud_n(aud_rst_n),
         .aud_viz_vld(aud_dbg_vld), .aud_viz_dout(aud_dbg_dout), .aud_viz_next(aud_dbg_next),

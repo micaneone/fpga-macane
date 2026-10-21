@@ -129,6 +129,10 @@ module disp_top #(
     //   bit1 = 音频格式（非 48 kHz / 非 16 位）。兜底页据此把第二行换成
     //   NEED 24BIT BMP / NEED 48KHZ WAV，否则现场只能看到干巴巴的 BAD IMAGE。
     input  wire [1:0]  fs_hint,
+    // ★★★ 2026-10-21【D5 · S1 插播态】= 1 时在亮度级之后叠「红框 + 1 Hz 红闪」，
+    //   位置在 bri_scale 之后、menu_ovl_cn 之前 ⇒ 报警罩压不住菜单（现场要边报边调）。
+    //   ★ 0 时 alert_ovl 逐位透传 ⇒ 不报警时输出与改前完全一致。
+    input  wire        alert_on,
     // ★★★ 2026-10-17【音频可视化（队友 viz_top）】：音频域那几根直接从顶层引进来。
     //   `aud_vld/aud_dout/aud_next` 是 `top_aud` 的**只读**握手副本（viz 只旁听，
     //   绝不驱动 aud_next —— 驱动了就是重复消费、音频会断，见队友文档 §5③）。
@@ -567,6 +571,27 @@ module disp_top #(
         .px_out (px_b)
     );
 
+    // ============================================================
+    //  ★★★ 2026-10-21【D5 · S1 插播态】报警叠层（纯组合、0 拍延迟）
+    // ------------------------------------------------------------
+    //  位置：`bri_scale`(px_b) → **[本模块 alert_ovl]** → `menu_ovl_cn`
+    //    ⇒ 报警红罩不压菜单（现场要能一边报警一边调音量/亮度）。
+    //  ★ 0 拍 ⇒ 直接吃 `de_z / mx2 / my2`（和 px_b 同一像素），
+    //    千万不要像 font32 那样补拍 —— 补拍会把整幅图右移一像素。
+    // ============================================================
+    wire [15:0] px_al;
+    alert_ovl u_alert (
+        .clk_pix  (clk_pix),
+        .rst_pix_n(rst_pix_n),
+        .de_in    (de_z),
+        .vs_in    (vs_z),
+        .x_in     (mx2),
+        .y_in     (my2),
+        .px_in    (px_b),
+        .alert_on (alert_on),
+        .px_out   (px_al)
+    );
+
     wire [15:0] px_m;
     wire        de_m, vs_m;
 
@@ -574,7 +599,7 @@ module disp_top #(
         .clk_pix(clk_pix), .rst_pix_n(rst_pix_n),
         .de_in(de_z), .vs_in(vs_z),
         .x_in(mx2), .y_in(my2),
-        .px_in(px_b),
+        .px_in(px_al),
         .px_out(px_m), .de_out(de_m), .vs_out(vs_m),
         .menu_on(menu_on), .menu_sel(menu_sel),
         // ★★★ 2026-10-15【参数菜单·第2步】把两个活值送进菜单层去查字模（纯接线、只读）
