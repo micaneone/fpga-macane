@@ -2512,6 +2512,19 @@ module top_m2 #(
     // ============================================================
     // ★★★ 2026-10-13【换照片时那阵沙沙的修复】：`aud_arm` = "人来按过 KEY3、等着响一次"
     reg         aud_arm;
+    // ★★★ 2026-10-21【D4 · BGM 循环】
+    //   `aud_ran` = "这一遍真的放过（busy 拉起来过）"。
+    //   state 3 靠它判"放完了"：busy 掉下来那一刻再发一次 play 请求，
+    //   数据还在 SDRAM 音效区里，不重装（重装要 0.2 s、还会闪一下屏）。
+    //   ★ 不用 `!busy` 直接触发，否则刚进 state 3、busy 还没拉起来的几拍也会被当成"放完"。
+    localparam integer BGM_LOOP = 1;       // 0 = 回到"只放一遍"的老行为（回退开关）
+    // ★ 2026-10-21【D4 · 消接缝"嗒"声】：放完之后先留一段静音再重起。
+    //   原因：`sfx_player` 在 data_done 之后是"指数衰减到 0"，衰减要几十毫秒；
+    //   原来 busy 一掉就立刻重发 play，新一遍的第 0 个采样直接顶上去 ⇒ 跳变 = 一声"嗒"。
+    //   留 40 ms（2,000,000 拍 @50 MHz）让衰减走完，重起时再从 0 起。
+    localparam [25:0] BGM_GAP = 26'd2_000_000;
+    reg         aud_ran;
+    reg  [25:0] aud_gap;
     // ★★★ 2026-10-17【提速 · 装载音乐】`aud_first` = "还没装好过第一条音频"
     //   上面 state 1 那 1 秒（50_000_000 拍 @50MHz）本来只是**开机**为了让用户先看清图片，
     //   但拨 SW3 换音频时也会照着走一遍 ⇒ 每换一条都要白等 1 秒（实际装载只要 0.2 s 左右）。
@@ -2541,6 +2554,8 @@ module top_m2 #(
             aud_st         <= 2'd0;
             aud_wait       <= 26'd0;
             aud_arm        <= 1'b0;
+            aud_ran        <= 1'b0;      // ★ D4 · BGM 循环：复位清"这一遍放过没有"
+            aud_gap        <= 26'd0;
             sw3_pend       <= 1'b0;      // ★★★ 2026-10-14 深夜【开关3 切音频】复位清掉挂起的拨动
             // ★★★ 2026-10-17【修 bug ③】`sel_aud` 原来**没有复位**（全文只有递增那两行赋值）
             //   ⇒ KEY4 软复位之后，别的音频状态全清、它却留着上一次的选择：
@@ -2682,7 +2697,22 @@ module top_m2 #(
                     aud_st   <= 2'd3;
                 end
             end
-            // ---- 3：做完，不再动 ----
+            // ---- 3：放完了 —— ★ D4：BGM 循环，重新起一遍（不重装） ----
+            2'd3: begin
+                if (aud_busy_w) begin
+                    aud_ran <= 1'b1;            // 真的放过（读出过数据）
+                    aud_gap <= 26'd0;
+                end
+                else if (aud_ran && BGM_LOOP && aud_loaded && !aud_fail) begin
+                    // ★ 留 40 ms 静音让"放完那一下的指数衰减"走完，再重起
+                    if (aud_gap >= BGM_GAP) begin
+                        aud_ran      <= 1'b0;
+                        aud_gap      <= 26'd0;
+                        aud_play_req <= 1'b1;   // 数据仍在音效区 ⇒ 只重发"开始播"
+                    end
+                    else aud_gap <= aud_gap + 26'd1;
+                end
+            end
             default: ;
             endcase
         end
