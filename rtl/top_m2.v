@@ -888,6 +888,7 @@ module top_m2 #(
     reg        img_req_pend;     // 有待发的换图请求
 
     reg        img_hold;         // ★ 2026-10-21：报警换图独占 SD（从脉冲起到 a_load_done/a_fail），压住音频/字幕去抢
+    reg  img_now;            // 1 = 这次请求是热插拔触发的，不等 0.5 s
 
     reg [25:0] img_wait;
 
@@ -1403,7 +1404,27 @@ module top_m2 #(
 
     // 全设计的复位：引脚复位 + PLL 稳定确认（已锁存）+ 软复位
 
-    wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
+    // ★★★ 2026-10-22【确认拔卡 ⇒ 整块软复位】
+//   需求：sd_lost（连续两次读失败 ⇒ 认定卡被拔）一旦成立，直接做一次**整块软复位**，
+//         让全设计（含 sd_init、菜单、状态机、字幕/音频装载锁存）从零开始，
+//         而不是只复位 A 轨（那条路在实测里恢复要 4 s，用户不能接受）。
+//   形式：16 ms **脉冲**（不是挂起到空闲的 FSM —— 那种写法 2026-10-21 v3 实测
+//         被 TD 判成常数复位、把设计从 8,708 slices 削到 3,151，绝对不能用）。
+//   怎么落：不自己另造复位 —— 把 `sd_lost` 的上升沿（单拍）送进 `stub_ctrl`，
+//         和 KEY4 共用同一个 `soft_rst` 发生器（`stub_ctrl.v` 里那台，
+//         `ctl_rst_n = rst_n & ~soft_rst`，菜单/串口状态/装载锁存全都吃它）。
+//         ★ 用"单拍上升沿"而不是电平：`sd_lost` 是电平，缓复位结束后它还在，
+//           直接送进去会一直重触发软复位，板子就再也起不来了。
+reg         sd_lost;        // 1 = 认定卡已拔走（声明提前，供 `sd_lost_rise` 使用）
+reg         sd_lost_d;
+wire        sd_lost_rise = sd_lost & ~sd_lost_d;
+
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) sd_lost_d <= 1'b0;
+    else        sd_lost_d <= sd_lost;
+end
+
+wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     // ============================================================
 
@@ -2614,6 +2635,50 @@ module top_m2 #(
 
     wire [15:0] dbg_caro_word = {bri_lv, 2'd0, viz_on, auto_caro, zoom_lv, menu_on, menu_sel, menu_edit};
 
+    // ★★★ 2026-10-22【临时探针 · 查"拔卡软复位只成功一次"】
+    //   字段 13（原行缓冲探针，早就接常数 0）借来报 SD/软复位状态：
+    //     [15:8] = 累计触发次数（sd_lost 上升沿个数，饱和到 255；吃 rst_n，不被软复位清）
+    //     [7]    = 当前 soft_rst 电平
+    //     [6]    = 当前 sd_lost 电平
+    //     [5:4]  = fail_cnt（连续读失败次数）
+    //     [3]    = a_sd_ready
+    //     [2]    = a_load_done 电平锁存（近 2 s 内有没有装载成功）
+    //     [1]    = a_busy
+    //     [0]    = sd_lost_rise 单拍（很难撞到，仅供逻辑核对）
+    reg  [7:0] dbg_sr_cnt;
+    reg        dbg_ld_ok;
+    reg  [11:0] dbg_ld_tmr;
+    reg  [1:0] fail_cnt;        // 连续读失败次数（实现在下面的 sd_lost 段，声明提前给探针用）
+    reg  [25:0] lost_tmr;       // ★ 2 s 确认计时（0 = 没在计时）
+    localparam integer LOST_CONFIRM_TICKS = 26'd100_000_000;   // 2.0 s @ 50 MHz
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            dbg_sr_cnt <= 8'd0;
+        end
+        else if (sd_lost_rise && (dbg_sr_cnt != 8'hFF)) begin
+            dbg_sr_cnt <= dbg_sr_cnt + 8'd1;
+        end
+    end
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            dbg_ld_ok  <= 1'b0;
+            dbg_ld_tmr <= 12'd0;
+        end
+        else if (a_load_done) begin
+            dbg_ld_ok  <= 1'b1;
+            dbg_ld_tmr <= 12'd3000;      // 约 2 s 后自清
+        end
+        else if (dbg_ld_tmr != 12'd0) begin
+            dbg_ld_tmr <= dbg_ld_tmr - 12'd1;
+        end
+        else begin
+            dbg_ld_ok  <= 1'b0;
+        end
+    end
+    wire [15:0] dbg_sd_word = {dbg_sr_cnt, soft_rst, sd_lost, fail_cnt,
+                               a_sd_ready, dbg_ld_ok, a_busy, sd_lost_rise};
+
+
 
 
     // 控制域 → 像素域：req_tgl 取边沿 = 一拍请求脉冲
@@ -2952,7 +3017,7 @@ module top_m2 #(
 
         .key1(key1 | menu_on), .key2(key2), .adv_req(adv_req_w), .force_load(img_load_pulse),
 
-        .sd_ready(sd_ready_eff), .a_busy(a_busy), .hold(stwr_busy),
+        .sd_ready(sd_ready_eff), .sd_lost_i(sd_lost_rise), .a_busy(a_busy), .hold(stwr_busy),
 
         // ★ 转场握手：屏上全米白了才真的去装；转场期间不受理新请求
 
@@ -4870,10 +4935,8 @@ module top_m2 #(
 
     // ============================================================
 
-    reg  [1:0]  fail_cnt;        // 连续失败次数（成功一次清零）
 
-    reg         sd_lost;         // 1 = 认定卡已拔走（把 sd_ready_eff 打掉）
-
+    
     // ★ `a_fail` 是**电平**（一直亮到下次 start），不是脉冲 ⇒ 必须取上升沿，
 
     //   否则一个坏素材就会把计数器瞬间顶满、把好卡判成"拔走了"。
@@ -4882,19 +4945,21 @@ module top_m2 #(
 
     wire        a_fail_rise = a_fail & ~a_fail_d;
 
-    always @(posedge clk or negedge sys_rst_n) begin
+    always @(posedge clk or negedge rst_n) begin
 
-        if (!sys_rst_n) a_fail_d <= 1'b0;
+        if (!rst_n) a_fail_d <= 1'b0;
 
         else            a_fail_d <= a_fail;
 
     end
 
-    always @(posedge clk or negedge sys_rst_n) begin
+    always @(posedge clk or negedge rst_n) begin
 
-        if (!sys_rst_n) begin
+        if (!rst_n) begin
 
             fail_cnt <= 2'd0;
+
+            lost_tmr <= 26'd0;
 
             sd_lost  <= 1'b0;
 
@@ -4905,6 +4970,8 @@ module top_m2 #(
             // A 轨刚被复位、还没 init 完 ⇒ 不计失败，等它重新就绪
 
             fail_cnt <= 2'd0;
+
+            lost_tmr <= 26'd0;
 
             sd_lost  <= 1'b0;
 
@@ -4920,9 +4987,23 @@ module top_m2 #(
 
         else if (a_fail_rise) begin
 
+            // ★ 2026-10-22【2 秒确认】用户要求：识别"SD 卡没了"的时间改成 2 s。
+            //   旧判据是"连续两次读失败"（每轮轮播 3 s 才有一次尝试）⇒ 实际 3~6 s 才认出来。
+            //   新判据：**第一次读失败**就启动 2 s 计时器，2 s 内只要有一次装载成功
+            //   （`a_load_done`）就撤销；否则判 `sd_lost`（⇒ 走整块软复位，见 stub_ctrl 的
+            //   `sd_lost_i`）。这样"坏一个素材"不会误判（下一次装载会成功），
+            //   真拔卡时最迟 2 s 内出 NO_CARD 页。
             if (fail_cnt != 2'd3) fail_cnt <= fail_cnt + 2'd1;
 
-            if (fail_cnt >= 2'd1) sd_lost  <= 1'b1;   // 连续第 2 次失败 ⇒ 判拔卡
+            lost_tmr <= LOST_CONFIRM_TICKS;
+
+        end
+
+        else if (lost_tmr != 26'd0) begin
+
+            lost_tmr <= lost_tmr - 26'd1;
+
+            if (lost_tmr == 26'd1) sd_lost <= 1'b1;   // 2 s 到点仍没成功 ⇒ 判拔卡
 
         end
 
@@ -6172,7 +6253,7 @@ module top_m2 #(
 
         //   `dbg_report` 里对应的冻结寄存器会被综合自然裁掉（帧格式不变）。
 
-        .lb_wbase(16'd0), .lb_rd0(16'd0),
+        .lb_wbase(dbg_sd_word), .lb_rd0(16'd0),
 
         .lb_rd1(16'd0),      .lb_words(16'd0),
 
@@ -6572,6 +6653,17 @@ module top_m2 #(
 
     //   没有挂起请求、上一首音频停了，才发这个脉冲；否则会把写突发切断。
 
+    // ★★★ 2026-10-22【热插拔提速】卡插回的那一拍，立刻重装一张图
+    //   原来只能等 3 s 轮播节拍（CARO_MS=3000）+ 0.5 s 保护窗口 ⇒ 插回后最长要
+    //   4 秒多才出图，中间一直是 LOADING/兜底页（现场实测 4.3 s）。
+    reg  a_sd_ready_d;
+    wire sd_back = sd_ready_eff & ~a_sd_ready_d;   // 0 -> 1 的那一拍
+
+    always @(posedge clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) a_sd_ready_d <= 1'b0;
+        else            a_sd_ready_d <= sd_ready_eff;
+    end
+
     // ============================================================
 
     always @(posedge clk or negedge sys_rst_n) begin
@@ -6586,6 +6678,8 @@ module top_m2 #(
 
             img_hold       <= 1'b0;
 
+            img_now        <= 1'b0;
+
         end
 
         else begin
@@ -6596,21 +6690,23 @@ module top_m2 #(
 
             img_hold <= img_load_pulse | (img_hold & ~(a_load_done | a_fail));
 
-            if (alert_rise | alert_fall)
-
+            if (alert_rise | alert_fall | sd_back) begin
                 img_req_pend <= 1'b1;
+                img_now      <= sd_back;      // 卡插回 => 这次不空等 0.5 s
+            end
 
-            else if (img_load_pulse)
-
+            else if (img_load_pulse) begin
                 img_req_pend <= 1'b0;
+                img_now      <= 1'b0;
+            end
 
 
 
-            if (img_req_pend && !tr_active && !a_busy && !req_pend_w && !aud_busy_w) begin
+            if (img_req_pend && !tr_active && !a_busy && !req_pend_w && (!aud_busy_w || img_now)) begin
 
                 // 等 0.5 s：让转场先把上一张图收干净，也给串口一个可观测的窗口
 
-                if (img_wait >= 26'd25_000_000) begin
+                if (img_wait >= (img_now ? 26'd1_000_000 : 26'd25_000_000)) begin
 
                     img_wait       <= 26'd0;
 
