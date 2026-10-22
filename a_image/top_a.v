@@ -133,6 +133,7 @@
             output        wav_done,         // ★ 单拍：这一条音频写进 SDRAM
             output        sub_done,         // ★ 单拍：这一条字幕写进 SDRAM
             output        fail,             // 出错（找不到 / 格式不对 / 丢数据 / 图太大）
+            output        o_fe_done,        // ★ 单拍：SD 前端刚读完一个扇区（扇区级进度，给顶层挂死看门狗用）
 
             // ---------------- SDRAM 写口 → 接 sdr_arb（9/28 定稿那套）----------------
             output        a_wr_req,         // 写请求：举着，直到 a_wr_ack
@@ -568,6 +569,7 @@
                              | wav_busy | wav2sdram_busy
                              | sub_busy | sub2sdram_busy;
             assign load_done = frame_done;
+            assign o_fe_done = fe_done;      // ★ 扇区级进度：每读完一个扇区一个单拍脉冲
             assign wav_done  = wav_wr_done_p;
             assign sub_done  = sub_wr_done_p;
             assign fail      = bmp_fail | dbg_overrun | size_bad | wav_an_fail

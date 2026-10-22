@@ -74,6 +74,7 @@ module stub_ctrl #(
     input  wire        force_load,
     input  wire        sd_ready,       // A：SD 卡初始化完成
     input  wire        sd_lost_i,      // ★ 2026-10-22：确认拔卡的单拍脉冲 ⇒ 触发一次整块软复位
+    input  wire        alert_rst_i,    // ★ 2026-10-22：收到报警（SW4 上升沿）的单拍脉冲 ⇒ 同一套整块软复位
     input  wire        a_busy,         // A：正在装载（装载期间不再触发）
     input  wire        hold,           // 1 = 别触发（B 自测图正在写大槽 0）
 
@@ -136,7 +137,7 @@ module stub_ctrl #(
             soft_rst <= 1'b0;
             rst_cnt  <= 32'd0;
         end
-        else if (k2_press | sd_lost_i) begin   // ★ 确认拔卡也走同一条软复位（整块，含菜单/串口状态/装载锁存）
+        else if (k2_press | sd_lost_i | alert_rst_i) begin   // ★ 确认拔卡 / 收到报警：走同一条软复位（整块，含菜单/串口状态/装载锁存）
             soft_rst <= 1'b1;
             rst_cnt  <= RST_TICKS[31:0];
         end

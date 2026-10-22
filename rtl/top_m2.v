@@ -1550,7 +1550,53 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
 
 
-    // ★ 2026-10-21：报警边沿 ⇒ 整条 A 轨复位（用户要求：拨报警开关就重置 SDRAM 写状态与 SD 读状态）
+    // ★ 2026-10-22 第三版（用户反馈：「拨回后 1 秒才开始复位」）：
+    //   改成**直接跟开关引脚**的双沿，不再跟 alert_on。
+    //   为什么：alert_on 在接点断开后还要保持 ALERT_HOLD_MS=10 s 才清零（报警保持逻辑，
+    //   防止干接点瞬断就退出报警），跟它走必然慢，而且慢多少取决于保持计数器走到哪。
+    //   现在：拨码引脚 → 两级同步 → 150 ms 去抖 → 双沿 ⇒ 拨过去/拨回来都在 ~150 ms 内
+    //   触发同一条整块软复位（与 KEY4/拔卡共用 stub_ctrl 的 soft_rst）。
+    //   仍然保留 0.3 s 武装窗口（arm_cnt）：0.3 s 远大于复位后开关注入的任何毛刺宽度，
+    //   环堵不住时就只会表现为"少复位一次"，不会变成连续重启。
+    reg [1:0]  sw4_s;                 // 两级同步（rst_n 域，软复位不清）
+    reg [22:0] sw4_stb;               // 稳定计数：7,500,000 拍 = 150 ms @ 50 MHz
+    reg        sw4_v;                 // 去抖后的开关电平
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            sw4_s   <= 2'b00;
+            sw4_stb <= 23'd0;
+            sw4_v   <= 1'b0;
+        end
+        else begin
+            sw4_s <= {sw4_s[0], sw4};
+            if (sw4_s[1] != sw4_v) begin
+                if (sw4_stb >= 23'd7_500_000) begin
+                    sw4_v   <= sw4_s[1];
+                    sw4_stb <= 23'd0;
+                end
+                else sw4_stb <= sw4_stb + 23'd1;
+            end
+            else sw4_stb <= 23'd0;
+        end
+    end
+
+    reg sw4_vq;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) sw4_vq <= 1'b0;
+        else        sw4_vq <= sw4_v;
+    end
+
+    reg [27:0] arm_cnt;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)                          arm_cnt <= 28'd0;
+        else if (soft_rst)                   arm_cnt <= 28'd0;
+        else if (arm_cnt != 28'd15_000_000)  arm_cnt <= arm_cnt + 28'd1;
+    end
+
+    wire alert_arm       = (arm_cnt == 28'd15_000_000);           // 0.3 s @ 50 MHz
+    wire alert_rst_pulse = alert_arm & (sw4_v ^ sw4_vq);          // ★ 双沿：拨过去 / 拨回来都复位
+
     //   为什么整块复位：报警集与广告集是两套素材，装载途中切会让写突发/读状态机/find 引擎都停在半路，
     //   复位一次最干净，代价约 0.5 s（SD 重新初始化）。
     always @(posedge clk or negedge sys_rst_n) begin
@@ -2649,8 +2695,12 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
     reg        dbg_ld_ok;
     reg  [11:0] dbg_ld_tmr;
     reg  [1:0] fail_cnt;        // 连续读失败次数（实现在下面的 sd_lost 段，声明提前给探针用）
-    reg  [25:0] lost_tmr;       // ★ 2 s 确认计时（0 = 没在计时）
-    localparam integer LOST_CONFIRM_TICKS = 26'd100_000_000;   // 2.0 s @ 50 MHz
+    reg  [25:0] lost_tmr;       // ★ 拔卡确认计时（0 = 没在计时）
+    // ★ 2026-10-22 用户要求：拔出确认时间对齐到 1 s（原来 2 s）
+    //   代价要说清楚：单张读失败后，若重试的那张是 1536×1152（装载要 4.7 s），
+    //   1 s 到点时它还没读完 ⇒ 会被判成"卡没了"。所以素材里不要放 >1 Mpx 的图，
+    //   或者把这里改回 26'd100_000_000（2 s）。
+    localparam integer LOST_CONFIRM_TICKS = 26'd50_000_000;    // 1.0 s @ 50 MHz
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             dbg_sr_cnt <= 8'd0;
@@ -3017,7 +3067,8 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
         .key1(key1 | menu_on), .key2(key2), .adv_req(adv_req_w), .force_load(img_load_pulse),
 
-        .sd_ready(sd_ready_eff), .sd_lost_i(sd_lost_rise), .a_busy(a_busy), .hold(stwr_busy),
+        .sd_ready(sd_ready_eff), .sd_lost_i(sd_lost_rise), .alert_rst_i(alert_rst_pulse),
+        .a_busy(a_busy), .hold(stwr_busy),
 
         // ★ 转场握手：屏上全米白了才真的去装；转场期间不受理新请求
 
@@ -3198,6 +3249,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
         .busy(a_busy), .load_done(a_load_done), .desc_done(a_desc_done),
 
         .ready_n(a_ready_n), .fail(a_fail), .sd_ready(a_sd_ready), .led_init(),
+        .o_fe_done(a_fe_done),
 
         .sub_done(a_sub_done),
 
@@ -4953,6 +5005,78 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     end
 
+    // ============================================================
+    //  ★★★ 2026-10-22【扇区级挂死看门狗】治"偶尔不复位"
+    // ------------------------------------------------------------
+    //  上一版看门狗盯 `a_wr_len`（写了多少字），上板结果是**一直复位**：
+    //  找 FAT / 找簇 / 扫目录那一段本来就不写 SDRAM，1 s 不写很正常。
+    //  正确的进度信号是 **SD 前端有没有在读扇区**：
+    //    · 找图时扇区一直在读 ⇒ 脉冲一直有 ⇒ 不误判
+    //    · 卡真被拔  ⇒ SPI 上没有响应、状态机干等 ⇒ 脉冲立刻停 ⇒ 判得出来
+    //  只在这两种情况下才计时：
+    //    · 有装载在跑（`a_busy` 或 `req_pend_w`）
+    //    · 卡已经初始化完（`a_sd_ready=1`；SD init 阶段本来就不读扇区）
+    //  1 s 没有扇区脉冲 ⇒ 当成一次失败，喂给同一个 lost_tmr（再 1 s 确认）。
+    reg  [25:0] fe_gap;              // 1.0 s @ 50 MHz = 50,000,000
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)                              fe_gap <= 26'd0;
+        else if (a_fe_done)                      fe_gap <= 26'd0;
+        else if (!(a_busy | req_pend_w))         fe_gap <= 26'd0;
+        else if (!a_sd_ready)                    fe_gap <= 26'd0;
+        else if (fe_gap != 26'd49_999_937)       fe_gap <= fe_gap + 26'd1;
+    end
+
+    reg  fe_stall_d;
+    wire fe_stall      = (fe_gap == 26'd49_999_937);
+    wire fe_stall_rise = fe_stall & ~fe_stall_d;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) fe_stall_d <= 1'b0;
+        else        fe_stall_d <= fe_stall;
+    end
+
+    // ============================================================
+    //  ★★★ 2026-10-22 晚【卡在位电平的下降沿 = 立即判"卡被拔"】
+    // ------------------------------------------------------------
+    //  hp8.csv 实测（看门狗版，用户拔卡）：
+    //    4.44 s  f2=009F（FAIL）f13 低字节 = 0x2A（fail_cnt=2）
+    //    5.20 s  f13 低字节 = 0x00（bit3 = a_sd_ready 掉了）、f25=0003（NO_CARD）
+    //    全程 `f13` 高字节 = 00 ⇒ **soft_rst 一次都没触发**。
+    //  原因：拔卡瞬间 `a_sd_ready` 就掉成 0，而下面 `else if (!a_sd_ready)` 分支
+    //        每拍都在清 `sd_lost`/`lost_tmr` —— 1 s 确认永远走不完 ⇒ sd_lost 出不来。
+    //  所以：卡在位电平的**下降沿本身就是证据**，直接判，不再等确认。
+    //  `!soft_rst` 是躲开"我们自己复位把 A 轨打掉、sd_ready 跟着掉"的那一下。
+    //  注意 sd_lost 只会是单拍（下一拍就被 !a_sd_ready 分支清掉），这正好是
+    //  stub_ctrl 要的上升沿；不会反复触发（之后再没有 1→0 的边沿）。
+    reg  sd_rdy_d;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) sd_rdy_d <= 1'b0;
+        else        sd_rdy_d <= a_sd_ready;
+    end
+    wire sd_rdy_fall = sd_rdy_d & ~a_sd_ready;
+
+    // ★ 2026-10-23【复位后 3 s 抑制窗】治"越复位越乱、串口一帧都不出"
+    //   现象：烧了下降沿判据版之后，板子连串口都没有一帧（帧计数器被反复复位）。
+    //   机理：软复位会把 A 轨打掉 ⇒ 它重新 init 时会先"乐观地"把 a_sd_ready 拉高
+    //         再掉下来（卡不在时尤其明显）⇒ 又产生一个新的下降沿 ⇒ 再复位……
+    //         于是复位周期比串口的 200 ms 上报周期还短，屏和串口全是死状。
+    //   做法：每次软复位后先把判据"缴枪"3 s，等 A 轨 init 稳定了再允许认下降沿。
+    //         真实拔卡时系统通常已经稳定运行很久，抑制窗早过了，不影响灵敏度。
+    reg [27:0] fall_arm;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)                  fall_arm <= 28'd0;
+        else if (soft_rst)           fall_arm <= 28'd150_000_000;   // 3.0 s @ 50 MHz
+        else if (fall_arm != 28'd0)  fall_arm <= fall_arm - 28'd1;
+    end
+    wire fall_arm_ok = (fall_arm == 28'd0);
+
+    // ★ 2026-10-22【已废弃：装载无进展看门狗】
+    //   试过用 "a_busy=1 且 a_wr_len 1 s 不动" 当挂死判据，上板结果是**一直复位**：
+    //   a_busy 是 bmp/wav/sub 三条链的总 busy，而找 FAT / 找簇 / 扫目录那一段本来就
+    //   不往 SDRAM 写数据，超过 1 s 很常见 ⇒ 看门狗把正常装载当成挂死。
+    //   要可靠地判断"读挂死"，必须看 **SD 前端有没有在读到数据**（扇区级进度），
+    //   而不是看 SDRAM 写了多少字。留作后续（需要 top_a 引出扇区计数）。
+    //   现在回到只认 a_fail 上升沿的判据。
+
     always @(posedge clk or negedge rst_n) begin
 
         if (!rst_n) begin
@@ -4962,6 +5086,18 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
             lost_tmr <= 26'd0;
 
             sd_lost  <= 1'b0;
+
+        end
+
+        else if (sd_rdy_fall && !soft_rst && fall_arm_ok) begin
+
+            // ★ 2026-10-22：卡在位电平掉了 ⇒ 立刻判"卡没了"（下降沿本身就是证据）
+
+            sd_lost  <= 1'b1;
+
+            fail_cnt <= 2'd0;
+
+            lost_tmr <= 26'd0;
 
         end
 
@@ -4985,7 +5121,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
         end
 
-        else if (a_fail_rise) begin
+        else if (a_fail_rise | fe_stall_rise) begin
 
             // ★ 2026-10-22【2 秒确认】用户要求：识别"SD 卡没了"的时间改成 2 s。
             //   旧判据是"连续两次读失败"（每轮轮播 3 s 才有一次尝试）⇒ 实际 3~6 s 才认出来。
