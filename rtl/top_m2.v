@@ -781,6 +781,23 @@ module top_m2 #(
 
     localparam [3:0]  SUB_SKIP   = 4'd0;          // 卡里第 1 个 .SUB（在自己的扩展名里数）
 
+    // ★★★ 2026-10-23【字幕双缓冲 + 跟图切换】
+    //   要修的两件事：
+    //     ① 字幕只在开机装过一次（`sub_st` 走完 0→1→2→3 就停在 done 态），
+    //        之后切图字幕内容永远不变 ⇒ 图文对不上；
+    //     ② 装载写和显示读**共用 SUB_BASE**（:750 的老注释也承认了），
+    //        想"每张图重装字幕"就会边写边读 ⇒ 撕裂/闪。
+    //   做法：字幕区本来就是 3200 字 = 两条 1600 字的槽（一条字幕 800×64/32=1600 字）。
+    //     · 写：永远写**不在显示**的那一槽（sub_wr_sel = ~sub_rd_sel）
+    //     · 读：显示当前槽（sub_rd_base）
+    //     · 装完才把 sub_rd_sel 翻到新槽 ⇒ 全程无撕裂；装失败就保持旧字幕
+    //     · 序号：槽 0 装卡里第 1 条 .SUB、槽 1 装第 2 条 ⇒ 切图时两条交替显示
+    localparam [20:0] SUB_SLOT_WORDS = 21'd1600;   // 一条字幕的容量
+    reg  sub_rd_sel;                               // 1 = 显示槽 0（复位 1 ⇒ 开机先往槽 0 写）
+    wire sub_wr_sel  = ~sub_rd_sel;
+    wire [20:0] sub_wr_base = SUB_BASE + (sub_wr_sel ? SUB_SLOT_WORDS : 21'd0);
+    wire [20:0] sub_rd_base = SUB_BASE + (sub_rd_sel ? SUB_SLOT_WORDS : 21'd0);
+
     // 暂定位置：800×64 的字幕条贴在屏幕底部（y = 600 - 64 - 8 = 528）、横向居中
 
     localparam [11:0] SUB_X0_DFLT = 12'd0;
@@ -894,7 +911,7 @@ module top_m2 #(
 
     wire [1:0]  a_sd_mode  = (img_load_pulse || img_hold) ? 2'd0 : (sub_load_pulse ? 2'd2 : (aud_want ? 2'd1 : 2'd0));
 
-    wire [20:0] a_sub_base = sub_load_pulse ? SUB_BASE : 21'd0;
+    wire [20:0] a_sub_base = sub_load_pulse ? sub_wr_base : 21'd0;
 
 
 
@@ -996,7 +1013,7 @@ module top_m2 #(
 
     wire [3:0]  a_sd_skip  = (img_load_pulse || img_hold || alert_on) ? 4'd0 :
 
-                             sub_load_pulse ? SUB_SKIP :
+                             sub_load_pulse ? {3'd0, sub_wr_sel} :
 
                              // ★ D5b：报警时音频那一路固定装第 5 条（ALARM_SKIP=4）
 
@@ -4605,7 +4622,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
         .sub_w(SUB_W_DFLT), .sub_h(SUB_H_DFLT),
 
-        .sub_base(SUB_FETCH_BASE), .sub_ink(SUB_INK),   // ★ 诊断：取数读音频区（见上面注释）
+        .sub_base(sub_rd_base), .sub_ink(SUB_INK),   // ★ 2026-10-23：读当前显示槽（双缓冲）
 
         .sub_tpat(SUB_TPAT),
 
@@ -5947,11 +5964,23 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     // ============================================================
 
+    // ★ 2026-10-23【切图触发字幕重装】图片装完的上升沿 ⇒ 回 1 态，往另一槽装另一条 .SUB
+    //   注意：这里**不清 sub_loaded** —— 旧槽还在显示，新内容装进另一槽，
+    //   装完（a_sub_done）才翻 sub_rd_sel。这样字幕全程不闪、失败也不丢旧字幕。
+    reg  sub_img_d;
+    always @(posedge clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) sub_img_d <= 1'b0;
+        else            sub_img_d <= a_load_done;
+    end
+    wire sub_img_rise = a_load_done & ~sub_img_d;
+
     always @(posedge clk or negedge sys_rst_n) begin
 
         if (!sys_rst_n) begin
 
             sub_st         <= 2'd0;
+
+            sub_rd_sel     <= 1'b1;      // ★ 复位 = 1 ⇒ 第一次写槽 0（= 卡里第 1 条 .SUB）
 
             sub_load_pulse <= 1'b0;
 
@@ -6021,6 +6050,8 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
                     sub_done_lat <= 1'b1;                      // ★ 探针：A 报"装完了"
 
+                    sub_rd_sel <= sub_wr_sel;                  // ★ 装完才翻显示槽（无撕裂）
+
                     sub_st     <= 2'd3;
 
                 end
@@ -6056,6 +6087,17 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
                         sub_st   <= 2'd3;
 
                     end
+
+                end
+
+                // ★ 2026-10-23【跟图换字幕】装完一张图 ⇒ 往另一槽装另一条 .SUB
+                else if (sub_img_rise) begin
+
+                    sub_fail   <= 1'b0;
+
+                    sub_wait   <= 26'd0;
+
+                    sub_st     <= 2'd1;
 
                 end
 
