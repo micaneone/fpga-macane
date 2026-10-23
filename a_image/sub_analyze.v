@@ -137,7 +137,9 @@
           output     [31:0] dbg_first_word,  // 第一个遮罩字（应为 32'h0000_0000）
           output     [31:0] dbg_rd_sec,
           output     [31:0] dbg_word_cnt,    // 应为 1600
-          output     [31:0] dbg_px_cnt       // 应为 51200
+          output     [31:0] dbg_px_cnt,      // 应为 51200
+output     [7:0]  dbg_hdr_cause,   // 2026-10-23：S_FAIL 时锁存的失因位
+output     [15:0] dbg_hdr_bytes    // 头两个原始字节 {byte0, byte1}
       );
 
           //======================================================================
@@ -181,7 +183,8 @@
                      S_RECV = 4'd4,
                      S_NEXT = 4'd5,
                      S_DONE = 4'd6,
-                     S_FAIL = 4'd7;
+                     S_FAIL = 4'd7,
+                     S_PAD  = 4'd8;      // 数据不够：用零字补齐（不再整条判失败）
 
           reg [3:0]  state;
 
@@ -206,6 +209,9 @@
           reg [15:0] h_bpp;
           reg [31:0] h_comp;
           reg        hdr_bad;           // 1 = 格式不对
+reg [7:0]  hdr_cause;         // 失因位：b0/1=BM，b2=bpp，b3=comp，b4=w，b5=h，b6=rd_err
+reg [15:0] hdr_bytes;         // {byte0, byte1} 原始前两字节
+reg [7:0]  b0_r;              // 第 0 字节原值
           reg        hdr_rdy;           // ★ 头 34 字节读完了
 
           localparam [7:0] CH_B = 8'h42;    // 'B'
@@ -244,6 +250,8 @@
           //  调试输出
           //======================================================================
           assign dbg_data_off   = hdr_off;
+          assign dbg_hdr_cause = hdr_cause;
+          assign dbg_hdr_bytes = hdr_bytes;
           assign dbg_first_word = first_word_r;
           assign dbg_rd_sec     = sec_cnt;
           assign dbg_word_cnt   = word_idx;
@@ -265,6 +273,9 @@
 
                   bm_b        <= 1'b0;
                   bm_m        <= 1'b0;
+                  hdr_cause   <= 8'd0;
+                  hdr_bytes   <= 16'd0;
+                  b0_r        <= 8'd0;
                   hdr_off     <= 32'd0;
                   h_w         <= 16'd0;
                   h_h         <= 16'd0;
@@ -305,6 +316,8 @@
                           f_start     <= 1'b1;
                           bm_b        <= 1'b0;
                           bm_m        <= 1'b0;
+                          hdr_cause   <= 8'd0;
+                          hdr_bytes   <= 16'd0;
                           hdr_off     <= 32'd0;
                           h_w         <= 16'd0;
                           h_h         <= 16'd0;
@@ -362,8 +375,15 @@
                           //==================================================
                           //  ① 文件头（★ 签名逐字节比，见文件头的警告）
                           //==================================================
-                          if (g_cnt == 32'd0)  bm_b <= (rd_data == CH_B);
-                          if (g_cnt == 32'd1)  bm_m <= (rd_data == CH_M);
+                          if (g_cnt == 32'd0)  begin
+                              b0_r      <= rd_data;
+                              hdr_bytes <= {rd_data, hdr_bytes[7:0]};
+                              bm_b      <= (rd_data == CH_B);
+                          end
+                          if (g_cnt == 32'd1)  begin
+                              hdr_bytes <= {hdr_bytes[15:8], rd_data};
+                              bm_m      <= (rd_data == CH_M);
+                          end
 
                           // ★★★ 数据起点必须【读出来】，不能写死 54 或 138
                           if (g_cnt == 32'd10) hdr_off[7:0]   <= rd_data;
@@ -460,7 +480,7 @@
                       if (word_idx >= TOT_W32)
                           state <= S_DONE;       // ★ 1600 个字都吐完了
                       else if (sec_cnt >= max_sec)
-                          state <= S_FAIL;       // 文件读完了但字没凑齐
+                          state <= S_PAD;        // 文件读完了但字没凑齐 → 补零，别判死
                       else begin
                           cur_lba <= cur_lba + 32'd1;
                           sec_cnt <= sec_cnt + 32'd1;
@@ -473,8 +493,20 @@
                       busy  <= 1'b0;
                       state <= S_IDLE;
                   end
+                  S_PAD: begin
+                      if (word_idx >= TOT_W32)
+                          state <= S_DONE;
+                      else begin
+                          mask_data  <= 32'd0;   // 补零字，写满整个槽（避免残留旧字幕）
+                          mask_we    <= 1'b1;
+                          mask_idx_r <= word_idx;
+                          word_idx   <= word_idx + 32'd1;
+                      end
+                  end
                   S_FAIL: begin
                       fail  <= 1'b1;
+                      hdr_cause <= {1'b0, rd_err, (h_h != REQ_H16), (h_w != REQ_W16),
+                                    (h_comp != COMP_REQ), (h_bpp != BPP_REQ), (!bm_m), (!bm_b)};
                       busy  <= 1'b0;
                       state <= S_IDLE;
                   end

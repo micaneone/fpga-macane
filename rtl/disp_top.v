@@ -74,7 +74,11 @@ module disp_top #(
     input  wire [11:0] sub_y0,
     input  wire [11:0] sub_w,         // 契约固定 800
     input  wire [11:0] sub_h,         // 契约固定 64
-    input  wire [20:0] sub_base,      // 字幕区基址 + 条号×1600
+    input  wire [20:0] sub_base,      // 字幕区基址（常数；一条 1600 字）
+    // ★★★ 2026-10-23【字幕双缓冲】显示哪一槽（0 = +0，1 = +1600）。
+    //   ★ 来源：top_m2 的 `sub_rd_sel`（50 MHz 控制域）。
+    //   ★ 这里**只接线**；同步和"取字起点锁存"都在 subtitle_ovl 的 clk_mem 侧做。
+    input  wire        sub_slot,
     input  wire [15:0] sub_ink,       // bit=1 画这个颜色（默认黑）
     input  wire        sub_tpat,      // ★ 一次性诊断：左半屏画自产方块（见 subtitle_ovl 注释）
     // ★★★ 2026-10-15【功能 · 开关4（SW4/C5）→ 字幕水平滚动】
@@ -220,7 +224,8 @@ module disp_top #(
     output wire [15:0] o_drop_cnt,
     output wire [15:0] o_abort_cnt,
     output wire [15:0] o_off_first,
-    output wire [15:0] o_align_bad
+    output wire [15:0] o_align_bad,
+    output wire        frame_start_o     // ★ 2026-10-23：帧首单拍（clk_pix 域）
 );
 
     // ============================================================
@@ -244,6 +249,8 @@ module disp_top #(
         .clk_pix(clk_pix), .rst_pix_n(rst_pix_n), .vs(vs),
         .frame_start(frame_start), .frame_id(frame_id)
     );
+
+    assign frame_start_o = frame_start;
 
     // ============================================================
     //  合成器（可缩放）
@@ -511,7 +518,8 @@ module disp_top #(
         // ★★ 2026-10-09：整条字幕在【显存域】取回来（读口那个域），像素侧在 clk_pix
         .clk_mem(clk_mem), .rst_mem_n(rst_mem_n),
         .sub_on(sub_on), .sub_x0(sub_x0), .sub_y0(sub_y0),
-        .sub_w(sub_w), .sub_h(sub_h), .sub_base(sub_base), .ink(sub_ink),
+        .sub_w(sub_w), .sub_h(sub_h),
+        .sub_base(sub_base), .sub_slot(sub_slot), .ink(sub_ink),
         .tpat_half(sub_tpat),
         // ★★★ 2026-10-15【功能 · 开关4 → 字幕水平滚动】：像素域电平（顶层 sw4 的四级同步之后）
         //   ★ 时钟域：和 `clk_pix` 同域（它就是本模块的 clk_pix）；复位仍用 `rst_pix_n`

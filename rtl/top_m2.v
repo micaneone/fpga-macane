@@ -781,6 +781,7 @@ module top_m2 #(
 
     localparam [3:0]  SUB_SKIP   = 4'd0;          // 卡里第 1 个 .SUB（在自己的扩展名里数）
 
+
     // ★★★ 2026-10-23【字幕双缓冲 + 跟图切换】
     //   要修的两件事：
     //     ① 字幕只在开机装过一次（`sub_st` 走完 0→1→2→3 就停在 done 态），
@@ -789,14 +790,22 @@ module top_m2 #(
     //        想"每张图重装字幕"就会边写边读 ⇒ 撕裂/闪。
     //   做法：字幕区本来就是 3200 字 = 两条 1600 字的槽（一条字幕 800×64/32=1600 字）。
     //     · 写：永远写**不在显示**的那一槽（sub_wr_sel = ~sub_rd_sel）
-    //     · 读：显示当前槽（sub_rd_base）
+    //     · 读：显示当前槽 —— ★ 2026-10-23 起不再在这里算出 21 位基址，
+    //       而是把 `sub_rd_sel` 这一位送进 subtitle_ovl，在**它自己的时钟域里**
+    //       2 级同步 + 每趟取字起点锁存（原因见 subtitle_ovl 里那段注释：
+    //       21 位基址直接跨 50 MHz → 125 MHz 会在换槽那一拍拼出错地址）。
     //     · 装完才把 sub_rd_sel 翻到新槽 ⇒ 全程无撕裂；装失败就保持旧字幕
     //     · 序号：槽 0 装卡里第 1 条 .SUB、槽 1 装第 2 条 ⇒ 切图时两条交替显示
     localparam [20:0] SUB_SLOT_WORDS = 21'd1600;   // 一条字幕的容量
-    reg  sub_rd_sel;                               // 1 = 显示槽 0（复位 1 ⇒ 开机先往槽 0 写）
+    reg  sub_rd_sel;                               // 1 = 显示槽 1（物理 +1600）；复位 1 ⇒ 开机先往槽 0 写
+
+        reg         sub_swap_pend;
+    reg         sub_rd_sel_next;   // ★ 2026-10-23：下一帧要显示的槽（帧首才兑现）
+    wire        frame_start_pix;   // ★ disp_top 导出的帧首单拍（clk_pix 域）
+
+    reg  [25:0] sub_swap_wait;                      // ★ 等翻槽的帧计数（1 s 超时��路用）                      // 1 = 字幕已装好，等 tr_active 落下再翻显示槽
     wire sub_wr_sel  = ~sub_rd_sel;
     wire [20:0] sub_wr_base = SUB_BASE + (sub_wr_sel ? SUB_SLOT_WORDS : 21'd0);
-    wire [20:0] sub_rd_base = SUB_BASE + (sub_rd_sel ? SUB_SLOT_WORDS : 21'd0);
 
     // 暂定位置：800×64 的字幕条贴在屏幕底部（y = 600 - 64 - 8 = 528）、横向居中
 
@@ -830,9 +839,18 @@ module top_m2 #(
 
     reg         sub_fail;             // 装载失败过（就当没有字幕，不再重试）
 
+    reg  [1:0]  sub_retry;            // 2026-10-23：同一趟最多再重试 2 次（SD 前端偶发丢字节）
+
     reg  [1:0]  sub_st;
 
     reg  [25:0] sub_wait;
+
+    // ★★★ 2026-10-23【字幕提速 · 别让预装抢走 SD 前端】
+    //   `sub_pend_w` = 字幕"想装 / 正在装"（状态 1/2）。
+    //   预装（prefetch）和字幕都走同一个 A 链，预装先开跑就会把字幕堵到
+    //   整张图装完（大图 1 s 以上）⇒ 屏上"图出来了、字幕半天不来"。
+    //   ⇒ 顶层的 `pf_go` 与它相与（见下面 pf_go_w），字幕优先。
+    wire        sub_pend_w = (sub_st == 2'd1) | (sub_st == 2'd2);
 
     // ---- ★★ 2026-10-09【字幕探针】上板看不到字，就靠这几个数定位 ----
 
@@ -1005,6 +1023,8 @@ module top_m2 #(
 
     wire [3:0]  a_skip;
 
+    reg  [3:0]  sub_skip_lat;
+
     // ★ D5b：卡上有没有第 5 个 WAV。装失败自动置 0 ⇒ 只丢报警音，不丢 BGM
 
     reg  alarm_audio_ok;
@@ -1013,7 +1033,7 @@ module top_m2 #(
 
     wire [3:0]  a_sd_skip  = (img_load_pulse || img_hold || alert_on) ? 4'd0 :
 
-                             sub_load_pulse ? {3'd0, sub_wr_sel} :
+                             sub_load_pulse ? sub_skip_lat :     // ★ 一图一字幕：跟图序号走
 
                              // ★ D5b：报警时音频那一路固定装第 5 条（ALARM_SKIP=4）
 
@@ -1340,6 +1360,8 @@ module top_m2 #(
     wire [7:0]  a_img_no;
 
     wire        a_busy, a_load_done, a_desc_done, a_fail, a_sd_ready;
+    wire [5:0]  a_fail_src;      // fail 来源      // ★ 2026-10-23 诊断：fail 的六个来源（声明必须在 top_a 例化之前）
+    wire [23:0] a_sub_dbg;       // 诊断：{失因位, 前两字节}
 
     wire [7:0]  a_ready_n;
 
@@ -1442,6 +1464,22 @@ always @(posedge clk or negedge rst_n) begin
 end
 
 wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
+
+    // ★ 2026-10-23【一图一字幕】字幕 skip 不再跟“缓冲槽号”，改成跟“当前这张图的序号”：
+    //   装图完成的那一刻把 a_skip 锁存下来，字幕那趟读就用它 ⇒ 第 k 张图配第 k 条 .SUB。
+    //   （报警时图/字幕都用 skip 0，即 EMG.BMP 配 EMG.SUB，不受影响）
+    reg         img_done_d;
+    wire        img_done_rise = a_load_done & ~img_done_d;
+
+    always @(posedge clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin
+            img_done_d   <= 1'b0;
+            sub_skip_lat <= 4'd0;
+        end else begin
+            img_done_d <= a_load_done;
+            if (img_done_rise) sub_skip_lat <= a_skip;
+        end
+    end
 
     // ============================================================
 
@@ -2370,7 +2408,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     // ============================================================
 
-    localparam integer CARO_MS = 3000;                       // 轮播间隔（ms）
+    localparam integer CARO_MS = 6000;                       // ★ 2026-10-23：3 s → 6 s（1536x1152 单张要 4.7 s，3 s 会让队列永远追不上，字幕被饿死）
 
     // ★ 位宽注意：3000 ms × 50 MHz = **150,000,000** ⇒ 至少要 28 位。
 
@@ -2424,7 +2462,9 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     //      默认（`CARO_ON_AT_BOOT=0`）本来就不会开机轮播，这一条是防止用户一起机就按 KEY3。
 
-    wire        caro_idle = ~(a_busy | ac2 | req_pend_w) & (sub_loaded | sub_fail);
+    // ★ 2026-10-23：再加 `sub_pend_w` —— 字幕已经请求但还没发脉冲的那几拍，
+    //   不许轮播插一脚进来抢同一个 start 口（实测一半字幕装载被这脚踹掉）。
+    wire        caro_idle = ~(a_busy | ac2 | req_pend_w | sub_pend_w) & (sub_loaded | sub_fail);
 
     wire        adv_req_w = (auto_caro & caro_tick & caro_idle & ~alert_on) | img_load_pulse;   // D5: 报警期间停轮播；报警边沿用 img_load_pulse 借同一条请求通路（slot/描述符/切换都由 stub_ctrl 管）
 
@@ -2596,7 +2636,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
         if (!rst_n) begin
 
-            vol_lv <= 4'd5;                        // ★ 2026-10-21：上电 50%
+            vol_lv <= 4'd0;                        // ★ 2026-10-23：上电静音（报警仍强制满档）
 
         end
 
@@ -2816,7 +2856,12 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     localparam AUD_PF_GO = AUDIO_OFF;             // 音频整个关掉时直接允许预装
 
-    wire       pf_go_w   = AUD_PF_GO | aud_loaded | aud_fail;
+    // ★★★ 2026-10-23【字幕优先于预装】
+    //   原式只看"音频自检做完没有"；现在再与上 `~sub_pend_w` ——
+    //   字幕一旦进入状态 1/2（想装 / 正在装），预装就先让路。
+    //   ★ 只影响 stub_ctrl 的"预装"那一条（`pf_go` 在它内部只喂 ③ 号判据），
+    //     用户按键/轮播请求、真正的换图装载都不受影响。
+    wire       pf_go_w   = (AUD_PF_GO | aud_loaded | aud_fail) & ~sub_pend_w;
 
     wire       pf_ready_w;
 
@@ -3012,7 +3057,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
             aud_s1  <= 2'd0; aud_s2  <= 2'd0;
 
-            vol_s1  <= 4'd5;  vol_s2 <= 4'd5;    // ★ 2026-10-21：上电 50%（原来是满档 15）
+            vol_s1  <= 4'd0;  vol_s2 <= 4'd0;    // ★ 2026-10-23：上电静音
 
             bri_s1  <= 4'd10; bri_s2 <= 4'd10;   // ★ 2026-10-21：上电 100%（10 = 原样）
 
@@ -3265,7 +3310,9 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
         .busy(a_busy), .load_done(a_load_done), .desc_done(a_desc_done),
 
-        .ready_n(a_ready_n), .fail(a_fail), .sd_ready(a_sd_ready), .led_init(),
+        .ready_n(a_ready_n), .fail(a_fail), .o_fail_src(a_fail_src),
+        .o_sub_dbg(a_sub_dbg),
+    .sd_ready(a_sd_ready), .led_init(),
         .o_fe_done(a_fe_done),
 
         .sub_done(a_sub_done),
@@ -4622,7 +4669,10 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
         .sub_w(SUB_W_DFLT), .sub_h(SUB_H_DFLT),
 
-        .sub_base(sub_rd_base), .sub_ink(SUB_INK),   // ★ 2026-10-23：读当前显示槽（双缓冲）
+        // ★ 2026-10-23【双缓冲跨域】只送"常数基址 + 1 位槽号"：
+        //   21 位基址直接跨 50 MHz → 125 MHz 会在换槽那一拍拼出中间值；
+        //   槽号在 subtitle_ovl 里 2 级同步 + 取字起点锁存（见该模块注释）。
+        .sub_base(SUB_BASE), .sub_slot(sub_rd_sel), .sub_ink(SUB_INK),
 
         .sub_tpat(SUB_TPAT),
 
@@ -4749,6 +4799,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
         .o_drop_cnt(lb_drop), .o_abort_cnt(lb_abort)
 
         ,.o_off_first(lb_off), .o_align_bad(lb_alignbad)
+    ,.frame_start_o(frame_start_pix)
 
     );
 
@@ -5014,6 +5065,14 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     wire        a_fail_rise = a_fail & ~a_fail_d;
 
+    // ★★★ 2026-10-23 诊断：top_a 的 fail 来源锁存成粘滞位 → 串口 .sb_flags
+    //    （原来这个字段固定送 16'd0，正好空着）
+    reg  [5:0]  fail_src_lat;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) fail_src_lat <= 6'd0;
+        else        fail_src_lat <= fail_src_lat | a_fail_src;
+    end
+
     always @(posedge clk or negedge rst_n) begin
 
         if (!rst_n) a_fail_d <= 1'b0;
@@ -5138,7 +5197,11 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
         end
 
-        else if (a_fail_rise | fe_stall_rise) begin
+        // ★ 2026-10-23：**单笔 a_fail 不再判拔卡**。
+    //   原因：1536×1152 那张图装载 ~1.3 s，装到一半就超过 1 s 确认窗口，
+    //   整机会被当成"卡拔了"复位（实测每 8.9 s 复位一次）。
+    //   真正的挂死由 fe_stall_rise（扇区停摆 1 s）和 !a_sd_ready 两条覆盖。
+    else if (fe_stall_rise) begin
 
             // ★ 2026-10-22【2 秒确认】用户要求：识别"SD 卡没了"的时间改成 2 s。
             //   旧判据是"连续两次读失败"（每轮轮播 3 s 才有一次尝试）⇒ 实际 3~6 s 才认出来。
@@ -5800,7 +5863,15 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
                 //   音效区和播放读的是同一片 SDRAM，边写边放 ⇒ 旧指针读到新数据 = 串味。
 
-                else if (!img_hold && !tr_active && !a_busy && !req_pend_w && !aud_busy_w) begin
+                // ★★★ 2026-10-23【和字幕互斥】三根 start 是或在一起的
+                //   （`a_start_use | aud_load_pulse | sub_load_pulse`），而 `a_sd_mode`
+                //   的优先级是 图 > 字幕 > 音频。若音频和字幕同一拍发脉冲，A 会按
+                //   "字幕"去装，音频 FSM 却以为自己在装 WAV ⇒ 等 a_wav_done 等到超时。
+                //   ⇒ 音频这边也看一眼 `sub_pend_w` / `sub_load_pulse`
+                //     （字幕那边本来就有 `!aud_load_pulse`），
+                //     再加 `!a_start_use` 防"图像启动那一拍"被抢。
+                else if (!img_hold && !tr_active && !a_busy && !req_pend_w && !aud_busy_w
+                         && !sub_pend_w && !sub_load_pulse && !a_start_use) begin
 
                     if (aud_wait >= aud_wait_need) begin   // ★ 换音频时不再白等 1 秒
 
@@ -5955,24 +6026,61 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
 
     // ============================================================
+    //  ★★★ 2026-10-23【字幕装载重做】
+    // ------------------------------------------------------------
+    //  原来的三个问题（上板现象：字幕上电出来慢 / 换图不跟着变 / 偶尔整个消失）：
+    //    ① 状态 0 要等"音频先装完"（aud_loaded/aud_fail）才动 ⇒ 字幕排在音频后面，
+    //       多等 1 s（音频启动延时）+ 一次音频装载（0.2~0.5 s）+ 0.5 s。
+    //    ② 状态 1 里那 0.5 s 是音频时代的遗留；现在字幕优先，40 µs 足够。
+    //    ③ 「跟图换字幕」那条 `sub_img_rise` 被写进了状态 2（等字幕写完），
+    //       而 top_a 用 a_busy 把图/字幕串行化 ⇒ 图片装完不可能发生在状态 2
+    //       ⇒ 那条分支永远不会命中，字幕永远停在开机第一条。
+    //  现在：
+    //    · 状态 0 只等"图已经出来过"（load_done_latch），不再等音频；
+    //    · 状态 1 等 A 链空闲 + 40 µs 就发（字幕优先于音频/预装）；
+    //    · 「跟图换字幕」移到状态 3（真正做完）里，触发源改成**换图请求被受理**
+    //       （不用 a_load_done：预装也会拉它，会让字幕抢在图片前面变），
+    //       且**不清 sub_loaded** ⇒ 装载期间旧字幕一直显示，装完（a_sub_done）才翻槽。
+    // ============================================================
+    //  ★ 2026-10-23【帧首锁存】帧首脉冲（clk_pix 单拍 → 翻转位 → clk 域取边沿）
+    // ============================================================
+    reg  fs_tog;
+    reg  fs_t1, fs_t2, fs_t3;
+    always @(posedge clk_pix or negedge sys_rst_n) begin
+        if (!sys_rst_n) fs_tog <= 1'b0;
+        else            fs_tog <= fs_tog ^ frame_start_pix;   // 一帧翻一次
+    end
+    always @(posedge clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin fs_t1 <= 1'b0; fs_t2 <= 1'b0; fs_t3 <= 1'b0; end
+        else            begin fs_t1 <= fs_tog; fs_t2 <= fs_t1; fs_t3 <= fs_t2; end
+    end
+    wire fs_pulse = fs_t2 ^ fs_t3;      // 每帧一个 clk 宽脉冲
 
-    //  ★★★ 2026-10-08【字幕自检装载】：等音频那条做完 → 等 0.5 秒 → 装一条 .SUB
-
-    //    ★ 顺序是刻意的：A 只有一个"start"口，两个自产装载必须串起来。
-
-    //      这里用"等 aud_loaded / aud_fail（或 AUDIO_OFF）+ 图已经出来"当闸门。
-
+    //    ★ 双缓冲本身不变：写 sub_wr_base（非显示槽）、读 sub_rd_sel 那一槽。
     // ============================================================
 
-    // ★ 2026-10-23【切图触发字幕重装】图片装完的上升沿 ⇒ 回 1 态，往另一槽装另一条 .SUB
-    //   注意：这里**不清 sub_loaded** —— 旧槽还在显示，新内容装进另一槽，
-    //   装完（a_sub_done）才翻 sub_rd_sel。这样字幕全程不闪、失败也不丢旧字幕。
-    reg  sub_img_d;
+    // ★ 2026-10-23【触发源：换图请求被受理，而不是"图片写进 SDRAM"】
+    //   ★ 为什么不用 `a_load_done`：**预装**（prefetch）也会拉这个脉冲 ——
+    //     后台槽偷偷装下一张时，图片还没换、字幕就先变了，图文对不上。
+    //   ★ `req_accept_w` = "本次换图请求被受理"（上电自动 / 按键 / 轮播 / 报警
+    //     共用这一拍）。它比转场结束**早**，所以字幕 FSM 从这一刻就进入状态 1，
+    //     一直等 `!tr_active`（转场结束）才真正去装：
+    //       · 预装        → 没有请求 ⇒ 不触发
+    //       · 按键/轮播   → 请求 → 等转场结束 → 装（快路/慢路都对）
+    //       · 上电第一张  → 状态 0 已经负责首装，pend 被这次装载清掉
+    //   ★ 这还有个副作用（是好事）：`sub_pend_w` 从请求那一刻就压住预装，
+    //     不会出现"转场刚结束、预装抢先开跑、字幕又被堵 1 秒"。
+    //   ★ 用 pending 位锁住，防止请求那一拍正好落在状态 2/1 被漏掉。
+    reg  sub_req_pend;
     always @(posedge clk or negedge sys_rst_n) begin
-        if (!sys_rst_n) sub_img_d <= 1'b0;
-        else            sub_img_d <= a_load_done;
+        if (!sys_rst_n)          sub_req_pend <= 1'b0;
+        else if (req_accept_w)   sub_req_pend <= 1'b1;   // 欠一次字幕重装
+        else if (sub_load_pulse) sub_req_pend <= 1'b0;   // 本次装载已经发出，欠账清掉
     end
-    wire sub_img_rise = a_load_done & ~sub_img_d;
+
+    // ★ 装载前只等这么久（40 µs @50 MHz）。原来的 0.5 s 是"音频先做完"时代的
+    //   保险；现在字幕排在音频/预装前面，A 链空闲下来就能开装。
+    localparam [25:0] SUB_SETTLE_TICKS = 26'd2_500_000;   // 2026-10-23: 40us -> 50ms（装载起始可能与上一条链尾部抢，先等干净）
 
     always @(posedge clk or negedge sys_rst_n) begin
 
@@ -5982,11 +6090,17 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
             sub_rd_sel     <= 1'b1;      // ★ 复位 = 1 ⇒ 第一次写槽 0（= 卡里第 1 条 .SUB）
 
+        sub_swap_pend  <= 1'b0;
+        sub_rd_sel_next <= sub_rd_sel;   // ★ 复位：下一帧显示的 = 当前显示的
+
+
             sub_load_pulse <= 1'b0;
 
             sub_loaded     <= 1'b0;
 
             sub_fail       <= 1'b0;
+
+            sub_retry      <= 2'd0;
 
             sub_wait       <= 26'd0;
 
@@ -6002,11 +6116,11 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
             case (sub_st)
 
-            // ---- 0：等"音频那条自检"收工（或音频关掉），并且图已经出来过 ----
+            // ---- 0：等第一张图真的出来（不再等音频；音频排在字幕后面）----
 
             2'd0: begin
 
-                if ((AUDIO_OFF || aud_loaded || aud_fail) && load_done_latch) begin
+                if (load_done_latch && !img_hold) begin
 
                     sub_wait <= 26'd0;
 
@@ -6016,13 +6130,16 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
             end
 
-            // ---- 1：挑一个"没在换图 / 没在装别的"的时刻，等 0.5 秒再发 ----
+            // ---- 1：挑一个"没在换图 / 没在装别的"的时刻，等 40 µs 再发 ----
 
             2'd1: begin
 
-                if (!tr_active && !a_busy && !req_pend_w && !aud_load_pulse) begin
+                // ★ 不能和图像/音频的 start 同拍：三根 start 是或在一起的，
+                //   同拍时 a_sd_mode 会把这次传输判给字幕或音频，另一方会等不到自己的 done。
+                if (!img_hold && !a_busy && !a_start_use
+                    && !req_pend_w && !aud_load_pulse) begin
 
-                    if (sub_wait >= 26'd25_000_000) begin      // 0.5 s @50MHz
+                    if (sub_wait >= SUB_SETTLE_TICKS) begin
 
                         sub_load_pulse <= 1'b1;
 
@@ -6038,9 +6155,14 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
                 end
 
+                // ★ 2026-10-23：一旦不空闲（转场/别人在装/别家 start 那一拍）
+                //   就把 40 µs 重新计 —— 避免"图像 start 的下一拍 a_busy 还没涨上来"
+                //   这个 1 拍窗口里把字幕脉冲插进去（两条链会抢 sd_mode）。
+                else sub_wait <= 26'd0;
+
             end
 
-            // ---- 2：等这一条字幕写进 SDRAM；失败就当没有字幕（不再重试）----
+            // ---- 2：等这一条字幕写进 SDRAM；失败就保留旧字幕（不清 sub_loaded）----
 
             2'd2: begin
 
@@ -6050,7 +6172,8 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
                     sub_done_lat <= 1'b1;                      // ★ 探针：A 报"装完了"
 
-                    sub_rd_sel <= sub_wr_sel;                  // ★ 装完才翻显示槽（无撕裂）
+                    sub_rd_sel_next <= sub_wr_sel;          // ★ 2026-10-23：只登记，帧首才兑现
+                    sub_retry   <= 2'd0;                    // 成功就清重试计数
 
                     sub_st     <= 2'd3;
 
@@ -6066,13 +6189,9 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
                 end
 
-                else if (a_fail) begin
-
-                    sub_fail <= 1'b1;
-
-                    sub_st   <= 2'd3;
-
-                end
+                // ★ 2026-10-23：a_fail 是三条链合并的**电平**，上一次失败会一直举着，不能在这里早判死
+                //   （实测一半字幕装载被误判失败 ⇒ 字幕不换）。只认 a_sub_done + 超时兜底。
+                // else if (a_fail) begin sub_fail <= 1'b1; sub_st <= 2'd3; end
 
                 // ★ 另一个兜底：A 已经闲下来了却迟迟没有 sub_done ⇒ 那条链没跑起来
 
@@ -6080,20 +6199,34 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
                     sub_wait <= sub_wait + 26'd1;
 
-                    if (sub_wait >= 26'd50_000_000) begin      // 1 s
-
-                        sub_fail <= 1'b1;
-
-                        sub_st   <= 2'd3;
-
+                    if (sub_wait >= 26'd30_000_000) begin      // 300 ms：一条字幕正常 ~135 ms
+                        sub_wait <= 26'd0;
+                        if (sub_retry < 2'd3) begin
+                            // 2026-10-23：SD 前端偶发丢字节 ⇒ 头解析失败。
+                            //   同一趟最多再试 2 次，不把整条字幕判死。
+                            sub_retry <= sub_retry + 2'd1;
+                            sub_st    <= 2'd1;
+                        end
+                        else begin
+                            sub_fail  <= 1'b1;
+                            sub_st    <= 2'd3;
+                        end
                     end
 
                 end
 
-                // ★ 2026-10-23【跟图换字幕】装完一张图 ⇒ 往另一槽装另一条 .SUB
-                else if (sub_img_rise) begin
+            end
+
+            // ---- 3：做完 —— 报警边沿 / 换了一张图 ⇒ 回 1 态重装另一槽 ----
+            //   ★ 这里**不碰 sub_loaded**：重装期间旧字幕继续显示；
+            //     a_sub_done 那一拍才翻 sub_rd_sel，画面不会闪空。
+
+            2'd3: begin
+
+                if (alert_rise | alert_fall) begin
 
                     sub_fail   <= 1'b0;
+                    sub_retry  <= 2'd0;
 
                     sub_wait   <= 26'd0;
 
@@ -6101,17 +6234,10 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
                 end
 
-            end
-
-            // ---- 3：做完 —— ★ 2026-10-21【报警换字幕】报警边沿回到 1 态重装 ----
-
-            2'd3: begin
-
-                if (alert_rise | alert_fall) begin
-
-                    sub_loaded <= 1'b0;
+                else if (sub_req_pend) begin
 
                     sub_fail   <= 1'b0;
+                    sub_retry  <= 2'd0;
 
                     sub_wait   <= 26'd0;
 
@@ -6124,6 +6250,12 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
             default: ;
 
             endcase
+
+            // ★ 2026-10-23【帧首锁存】只在帧起点翻字幕槽：与图像描述符同一帧边界生效。
+            //   不再看 tr_active（转场不是帧边界；大图时它能高 4 s 多，字幕会被拖住）。
+            if (fs_pulse) begin
+                sub_rd_sel <= sub_rd_sel_next;
+            end
 
         end
 
@@ -6431,9 +6563,9 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
         //   `dbg_report` 里对应的冻结寄存器会被综合自然裁掉（帧格式不变）。
 
-        .lb_wbase(dbg_sd_word), .lb_rd0(16'd0),
+        .lb_wbase(dbg_sd_word), .lb_rd0({8'd0, a_sub_dbg[23:16]}),
 
-        .lb_rd1(16'd0),      .lb_words(16'd0),
+        .lb_rd1(a_sub_dbg[15:0]),      .lb_words(16'd0),
 
         // ★ 逐字对齐校验：第 1 个字偏几个 / 本趟几个字不对（0 = 逐字全对）
 
@@ -6553,7 +6685,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
         //   判读：0~10 拍 = 一切正常；几百拍 = 被写突发挡过（配合字段 30 的 bit9）。
 
-        .sb_flags(16'd0),
+        .sb_flags({10'd0, fail_src_lat}),          // ★ 诊断：fail 来源粘滞位
 
         // ★★ 2026-10-06：字段 12 的 bit1 从"tag 队列脱钩过"改成
 

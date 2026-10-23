@@ -133,6 +133,9 @@
             output        wav_done,         // ★ 单拍：这一条音频写进 SDRAM
             output        sub_done,         // ★ 单拍：这一条字幕写进 SDRAM
             output        fail,             // 出错（找不到 / 格式不对 / 丢数据 / 图太大）
+            output [5:0]  o_fail_src,
+            output [23:0] o_sub_dbg,           // 2026-10-23 诊断：{失因位, 前两字节}
+       // ★ 2026-10-23 诊断：{sub_short,sub_overrun,sub_an_fail,wav_an_fail,overrun,bmp|size_bad}
             output        o_fe_done,        // ★ 单拍：SD 前端刚读完一个扇区（扇区级进度，给顶层挂死看门狗用）
 
             // ---------------- SDRAM 写口 → 接 sdr_arb（9/28 定稿那套）----------------
@@ -209,6 +212,8 @@
             wire [31:0] sub_mask_idx;
             wire [15:0] sub_w, sub_h;
             wire        sub_info_valid;
+            wire [7:0]  sub_hdr_cause;
+            wire [15:0] sub_hdr_bytes;
             wire        sub2sdram_busy, sub_wr_done_p;
 
             // ---- ★★★ 第②步：共享 SD 前端（三条链共用本文件里唯一那份 sd_top）----
@@ -574,7 +579,11 @@
             assign sub_done  = sub_wr_done_p;
             assign fail      = bmp_fail | dbg_overrun | size_bad | wav_an_fail
                              | sub_an_fail | dbg_sub_overrun | dbg_sub_short;
+            // ★ 2026-10-23 诊断用：把 fail 的六个来源分别送出去（顶层做粘滞锁存）
+            assign o_fail_src = {dbg_sub_short, dbg_sub_overrun, sub_an_fail,
+                                 wav_an_fail, dbg_overrun, (bmp_fail | size_bad)};
             assign dbg_scaled= 1'b0;      // ★ 不再缩放（端口保留，队友不用改接线）
+            assign o_sub_dbg  = {sub_hdr_cause, sub_hdr_bytes};   // 诊断
 
             //======================================================================
             //  ★★★ 基址锁存（都要在 start 那一刻锁，不能直接用组合值）
@@ -846,7 +855,9 @@
                 .dbg_first_word (),
                 .dbg_rd_sec     (),
                 .dbg_word_cnt   (),
-                .dbg_px_cnt     ()
+                .dbg_px_cnt     (),
+                .dbg_hdr_cause  (sub_hdr_cause),
+                .dbg_hdr_bytes  (sub_hdr_bytes)
             );
 
             sub2sdram u_sub2sdram (

@@ -62,7 +62,14 @@ module subtitle_ovl (
     input  wire [11:0] sub_y0,
     input  wire [11:0] sub_w,       // 契约固定 800
     input  wire [11:0] sub_h,       // 契约固定 64
-    input  wire [20:0] sub_base,    // 字幕区基址 + 条号×1600
+    input  wire [20:0] sub_base,    // 字幕区基址（常数；一条 1600 字）
+    // ★★★ 2026-10-23【字幕双缓冲 · 显示槽号】
+    //   0 = 槽 0（+0），1 = 槽 1（+1600）。来自顶层 `sub_rd_sel`（50 MHz 控制域）。
+    //   ★ 为什么只送 1 位：21 位基址直接跨域，在"换槽那一拍"可能被采成
+    //     新旧混合的地址（例如 2041660 和 2043260 只差 bit10/bit9，混一下就指到
+    //     别的区域）⇒ 取回一整条垃圾 ⇒ 屏上"字幕偶尔整个消失"。
+    //   ★ 本模块在 clk_mem 侧对它做 2 级同步，并且**每趟取字开始时锁存基址**。
+    input  wire        sub_slot,
     input  wire [15:0] ink,         // bit=1 画这个颜色（默认 16'h0000 = 黑）
     // ★★★ 2026-10-15【功能 · 开关4（SW4 / C5）→ 字幕水平滚动】—— 使能（**电平**，不是脉冲）
     //   1 = 滚动（每帧把"取字/取位的列"偏移 +STEP）；0 = 不滚动且**帧首把偏移清 0** ⇒
@@ -252,8 +259,15 @@ module subtitle_ovl (
     reg  [10:0] wcnt;
     reg  [11:0] rcnt;            // ★ 本趟【收到】了几个字（含要丢掉的那 RD_SKIP 个）
 
+    // ★★★ 2026-10-23【双缓冲 · 跨域安全】
+    //   sub_slot 从 50 MHz 控制域来 ⇒ 这里 2 级同步到 clk_mem；
+    //   `fetch_base` 在**每趟取字的起点**锁存 ⇒ 整趟 1600 字必然来自同一槽，
+    //   换槽即使正好落在取字途中，也不会把两条字幕拼成一条。
+    reg         slot_m1, slot_m2;
+    reg  [20:0] fetch_base;
+
     assign mem_req  = m_req;
-    assign mem_base = sub_base;      // ★ 常数，直接给（顶层就是 SUB_BASE）
+    assign mem_base = fetch_base;
     assign mem_len  = WLEN;
     assign mem_next = m_next;
 
@@ -269,13 +283,19 @@ module subtitle_ovl (
             ft3       <= 1'b0;
             o_row_cnt <= 16'd0;
             fetch_done_tgl <= 1'b0;
+            slot_m1    <= 1'b0;
+            slot_m2    <= 1'b0;
+            fetch_base <= sub_base;
         end
         else begin
             ft1 <= fetch_tgl;  ft2 <= ft1;  ft3 <= ft2;      // toggle 三级同步
+            slot_m1 <= sub_slot;  slot_m2 <= slot_m1;        // 槽号 2 级同步（慢变单 bit）
             case (fst)
             F_IDLE: begin
                 m_next <= 1'b0;
                 if (fetch_start) begin
+                    // ★ 起点锁存：本趟从哪个槽取，之后 sub_slot 再变也不影响这一趟
+                    fetch_base <= sub_base + (slot_m2 ? 21'd1600 : 21'd0);
                     m_req <= 1'b1;
                     wcnt  <= 11'd0;
                     rcnt  <= 12'd0;
