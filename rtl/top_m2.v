@@ -851,6 +851,7 @@ module top_m2 #(
     //   整张图装完（大图 1 s 以上）⇒ 屏上"图出来了、字幕半天不来"。
     //   ⇒ 顶层的 `pf_go` 与它相与（见下面 pf_go_w），字幕优先。
     wire        sub_pend_w = (sub_st == 2'd1) | (sub_st == 2'd2);
+    reg         sub_req_pend;   // ★ 字幕欠一次装（用来压住音频，字幕优先）
 
     // ---- ★★ 2026-10-09【字幕探针】上板看不到字，就靠这几个数定位 ----
 
@@ -1470,6 +1471,25 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
     //   （报警时图/字幕都用 skip 0，即 EMG.BMP 配 EMG.SUB，不受影响）
     reg         img_done_d;
     wire        img_done_rise = a_load_done & ~img_done_d;
+
+    // ★ 2026-10-24【字幕先就位】把送给 stub_ctrl 的 a_load_done 延 300 ms：
+    //   字幕 FSM 用快的那一份立即开始装（0.14 s），而 commit+转场推后 300 ms，
+    //   两者落在同一帧附近上屏。
+    reg  [23:0] ldly_cnt;
+    reg         a_load_done_dly;
+    always @(posedge clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin
+            ldly_cnt <= 24'd0; a_load_done_dly <= 1'b0;
+        end else if (a_load_done) begin
+            ldly_cnt <= 24'd1;            // ★ 2026-10-24：遍迟 300 ms 取消（它是字幕“慢几拍”的一半成因）
+            a_load_done_dly <= 1'b0;
+        end else if (ldly_cnt != 24'd0) begin
+            ldly_cnt <= ldly_cnt - 24'd1;
+            a_load_done_dly <= (ldly_cnt == 24'd1);
+        end else begin
+            a_load_done_dly <= 1'b0;
+        end
+    end
 
     always @(posedge clk or negedge sys_rst_n) begin
         if (!sys_rst_n) begin
@@ -2464,7 +2484,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     // ★ 2026-10-23：再加 `sub_pend_w` —— 字幕已经请求但还没发脉冲的那几拍，
     //   不许轮播插一脚进来抢同一个 start 口（实测一半字幕装载被这脚踹掉）。
-    wire        caro_idle = ~(a_busy | ac2 | req_pend_w | sub_pend_w) & (sub_loaded | sub_fail);
+    wire        caro_idle = ~(a_busy | ac2 | req_pend_w | sub_pend_w | sub_req_pend) & (sub_loaded | sub_fail);   // ★ 字幕还欠着就别轮播（防大图拖慢字幕）
 
     wire        adv_req_w = (auto_caro & caro_tick & caro_idle & ~alert_on) | img_load_pulse;   // D5: 报警期间停轮播；报警边沿用 img_load_pulse 借同一条请求通路（slot/描述符/切换都由 stub_ctrl 管）
 
@@ -3150,7 +3170,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
         // ★★★ 2026-10-08【预装】四根新线
 
-        .pf_go(pf_go_w), .a_load_done(a_load_done),
+        .pf_go(pf_go_w), .a_load_done(a_load_done_dly),
 
         .pf_ready_o(pf_ready_w), .req_accept_o(req_accept_w)
 
@@ -5839,7 +5859,9 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
                 end
 
-                else if (load_done_latch && !aud_loaded && !aud_fail) begin
+                // ★ 2026-10-24：字幕优先——字幕还欠着装就先别抢 SD（否则字幕要等音频 0.4 s）
+                else if (load_done_latch && !aud_loaded && !aud_fail
+                         && !sub_req_pend && !sub_pend_w) begin
 
                     aud_wait <= 26'd0;
 
@@ -6056,6 +6078,21 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
     end
     wire fs_pulse = fs_t2 ^ fs_t3;      // 每帧一个 clk 宽脉冲
 
+    // ★ 2026-10-24【帧差探针】图装完 → 字幕装完 差多少帧（直接量，不猜）
+    reg  [15:0] frame_cnt;
+    reg  [15:0] t_img, d_sub;
+    reg  [15:0] sub_t0, sub_ft, sub_rt;
+    always @(posedge clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin frame_cnt <= 16'd0; t_img <= 16'd0; d_sub <= 16'd0; end
+        else begin
+            if (fs_pulse) frame_cnt <= frame_cnt + 16'd1;
+            if (img_done_rise) t_img <= frame_cnt;
+            if (a_sub_done)   d_sub <= frame_cnt - t_img;
+            if (sub_load_pulse) sub_t0 <= frame_cnt;
+            if (a_sub_done)     sub_ft <= frame_cnt - sub_t0;
+        end
+    end
+
     //    ★ 双缓冲本身不变：写 sub_wr_base（非显示槽）、读 sub_rd_sel 那一槽。
     // ============================================================
 
@@ -6071,7 +6108,6 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
     //   ★ 这还有个副作用（是好事）：`sub_pend_w` 从请求那一刻就压住预装，
     //     不会出现"转场刚结束、预装抢先开跑、字幕又被堵 1 秒"。
     //   ★ 用 pending 位锁住，防止请求那一拍正好落在状态 2/1 被漏掉。
-    reg  sub_req_pend;
     always @(posedge clk or negedge sys_rst_n) begin
         if (!sys_rst_n)          sub_req_pend <= 1'b0;
         else if (req_accept_w)   sub_req_pend <= 1'b1;   // 欠一次字幕重装
@@ -6727,9 +6763,9 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
         //   ⇒ 这一版既有显示、又有音频，一次烧录就能同时判这两条。
 
-        .sb_rise (16'd0),
+        .sb_rise (sub_ft),         // ★ 字幕传输帧数（发起→完成）
 
-        .sb_col  (aud_dbg_cnt[15:0]),
+        .sb_col  (sub_rt),         // ★ 字幕超时次数
 
         .rv_col  (aud_dbg_sum[15:0]),
 

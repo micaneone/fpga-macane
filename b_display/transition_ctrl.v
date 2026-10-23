@@ -66,7 +66,7 @@ module transition_ctrl #(
     //    **32 帧 ≈ 0.53 s**，而且 transition.v 里三个特效都换成了**软边混合**（逐像素系数）
     //    ⇒ 同样是 0.53 s，看起来连续得多。
     //  ★ 想再慢/再细就改这一个数：4 ⇒ 64 帧 ≈ 1.07 s（最丝滑）；16 ⇒ 回到原来的 0.27 s。
-    parameter integer STEP     = 8,
+    parameter integer STEP     = 24,   // ★ 2026-10-24：0.53 s → 0.18 s（字幕等转场结束，缩短它就是缩短字幕迟到）
     // 米白至少保持几帧：万一 ver 在发起之前就已经变过，也不至于"一闪而过"
     parameter integer HOLD_MIN = 2
 )(
