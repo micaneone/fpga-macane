@@ -22,9 +22,11 @@
 //
 //  ★ 层级（高者覆盖低者，同一像素只命中一层）
 //        ① 文字（CLR_INK）  ← 只在字形点灯处覆盖
-//        ② 选中格描边（CLR_SEL，3px）
+//        ② 选中格描边（CLR_SEL 亮蓝 3px；★ 2026-10-24：KEY2 确认进入调节态后变亮红 CLR_RED，便于识别）
 //        ③ 未选中格描边（CLR_FRAME，1px）
-//        ④ 其余像素直通（无底色！）
+//        ④ 半透明底：格内把画面压到 50% 亮度（RGB565 没有 alpha，
+//           `(px>>1)&0x7BEF` ≈ 和黑色 50% 混合，字能看清又不会完全挡住画面）
+//        ⑤ 小格之外直通（逐像素不变）
 // ============================================================
 `timescale 1ns / 1ps
 
@@ -42,6 +44,7 @@ module menu_ovl_cn #(
     // ---- 颜色（RGB565）----
     parameter [15:0] CLR_FRAME = 16'h8410,   // 未选中描边 中灰（和旧分隔线同一个灰）
     parameter [15:0] CLR_SEL   = 16'h20FF,   // 选中描边 亮蓝（和旧选中行同一个蓝）
+    parameter [15:0] CLR_RED   = 16'hF800,   // ★ 2026-10-24【确认后变红】KEY2 确认（进调节态）⇒ 选中格描边变亮红
     parameter [15:0] CLR_INK   = 16'hFFC2,   // 文字 亮黄白
     // ---- 字形 ----
     parameter integer CELL    = 24,     // 字形边长（= font_cn 的口径）
@@ -61,6 +64,7 @@ module menu_ovl_cn #(
     // ---------------- 菜单状态（慢变电平，顶层已同步到 clk_pix）----------------
     input  wire        menu_on,
     input  wire [2:0]  menu_sel,      // 选中行 0..3
+    input  wire        menu_edit,     // ★ 2026-10-24：KEY2 确认（调节态）=1 ⇒ 选中格描边变红
     // ---------------- 要显示的"活值"（只读，绝不写回）----------------
     input  wire [2:0]  zoom_lv,       // 0..5
     input  wire [1:0]  sel_aud,       // （2026-10-24 起不再显示：行 1 换成可视化开关；端口保留，disp_top 铺线不动）
@@ -148,6 +152,10 @@ module menu_ovl_cn #(
     wire is_sel   = (row_now == menu_sel);
     wire draw_sel = menu_on && in_cell &&  is_sel && b_sel;
     wire draw_frm = menu_on && in_cell && !is_sel && b_norm;
+
+    // ---- 半透明底：格内画面压到 50% 亮度（≈ 和黑色 50% 混合，RGB565 无 alpha 的近似做法）----
+    wire        draw_fill = menu_on && in_cell;
+    wire [15:0] px_dim    = (px_p >> 1) & 16'h7BEF;
 
     // ---- 文字格：横向 [TXT_X0, TXT_X0+168)，纵向 [row_top+TOP_OFF, +24) ----
     wire [11:0] rx = x_p - TXT_X0[11:0];
@@ -242,10 +250,11 @@ module menu_ovl_cn #(
         end else begin
             de_out <= de_p;
             vs_out <= vs_p;
-            if (draw_text)     px_out <= CLR_INK;
-            else if (draw_sel) px_out <= CLR_SEL;
-            else if (draw_frm) px_out <= CLR_FRAME;
-            else               px_out <= px_p;
+            if (draw_text)      px_out <= CLR_INK;
+            else if (draw_sel)  px_out <= menu_edit ? CLR_RED : CLR_SEL;   // 确认后（调节态）外框变红
+            else if (draw_frm)  px_out <= CLR_FRAME;
+            else if (draw_fill) px_out <= px_dim;      // 半透明底（画面压暗 50%）
+            else                px_out <= px_p;
         end
     end
 

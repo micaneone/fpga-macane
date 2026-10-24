@@ -100,6 +100,7 @@ module disp_top #(
     //     漏接会让综合报"端口未连接"而不是悄悄接 0（菜单那一路要的正是"漏接就报错"）。
     input  wire        menu_on,       // 1 = 画菜单面板；0 = 逐位透传
     input  wire [2:0]  menu_sel,      // 选中行 0..4（`>` 光标跟着它走；★ 2026-10-18 起 5 行 ⇒ 3 位）
+    input  wire        menu_edit,     // ★ 2026-10-24：KEY2 确认（调节态）⇒ 选中格描边变红
     // ---------------- ★★★ 2026-10-15【参数菜单·第2步】要显示的"活值" ----------------
     //   ★ 这两根纯接线：本模块一个门都不加，直接透传给 `menu_ovl` 去查字模。
     //   ★ **只读**：菜单只是"显示"这两个值，本步**没有任何写回**（第 3 步才通过
@@ -609,7 +610,7 @@ module disp_top #(
         .x_in(mx2), .y_in(my2),
         .px_in(px_al),
         .px_out(px_m), .de_out(de_m), .vs_out(vs_m),
-        .menu_on(menu_on), .menu_sel(menu_sel),
+        .menu_on(menu_on), .menu_sel(menu_sel), .menu_edit(menu_edit),
         // ★★★ 2026-10-15【参数菜单·第2步】把两个活值送进菜单层去查字模（纯接线、只读）
         .zoom_lv(menu_zoom_lv), .sel_aud(menu_sel_aud),
         // ★★★ 2026-10-24【行 1 换成可视化开关】：面板显示 ON/OFF 用（真实开关在 top_m2 的 viz_on）

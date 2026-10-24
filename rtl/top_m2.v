@@ -3031,7 +3031,9 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     reg  [MENU_W-1:0] menu_sel_s1, menu_sel_s2;         // menu_sel → 像素域（两级）
 
-    // ★ 2026-10-17：`menu_edit` 不再需要送像素域（面板高亮条已删，调节态没有画面反馈）
+    // ★ 2026-10-17：`menu_edit` 曾不再需要送像素域（面板高亮条已删，调节态没有画面反馈）
+    // ★ 2026-10-24：又要送了 —— 用户要求"确认后外面的框变红"（KEY2 进调节态 ⇒ 选中格描边变红）
+    reg        menu_edit_s1, menu_edit_s2;                  // menu_edit → 像素域（两级）
 
 
 
@@ -3043,6 +3045,8 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
             menu_sel_s1 <= {MENU_W{1'b0}};  menu_sel_s2 <= {MENU_W{1'b0}};
 
+            menu_edit_s1 <= 1'b0;           menu_edit_s2 <= 1'b0;
+
         end
 
         else begin
@@ -3050,6 +3054,8 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
             menu_on_s1  <= menu_on;    menu_on_s2  <= menu_on_s1;
 
             menu_sel_s1 <= menu_sel;   menu_sel_s2 <= menu_sel_s1;
+
+            menu_edit_s1 <= menu_edit; menu_edit_s2 <= menu_edit_s1;
 
         end
 
@@ -4735,7 +4741,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
         //     整个菜单层被常数传播消掉 ⇒ 一个门都不多、屏上逐像素回到改前。
 
-        .menu_on(menu_on_s2), .menu_sel(menu_sel_s2),
+        .menu_on(menu_on_s2), .menu_sel(menu_sel_s2), .menu_edit(menu_edit_s2),
 
         // ★★★ 2026-10-15【参数菜单·第2步】菜单里要显示的活值（像素域同步副本、只读）
 
