@@ -2656,7 +2656,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
         if (!rst_n) begin
 
-            vol_lv <= 4'd0;                        // ★ 2026-10-23：上电静音（报警仍强制满档）
+            vol_lv <= 4'd2;                        // ★ 2026-10-24：上电 20%（vol_lv 0..10，2 = 20%；不静音，展会现场一上电就有声但别太响）
 
         end
 
@@ -3077,7 +3077,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
             aud_s1  <= 2'd0; aud_s2  <= 2'd0;
 
-            vol_s1  <= 4'd0;  vol_s2 <= 4'd0;    // ★ 2026-10-23：上电静音
+            vol_s1  <= 4'd5;  vol_s2 <= 4'd5;    // ★ 2026-10-24：上电 50%
 
             bri_s1  <= 4'd10; bri_s2 <= 4'd10;   // ★ 2026-10-21：上电 100%（10 = 原样）
 
@@ -4947,6 +4947,44 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     // ============================================================
 
+    // ★★★ 2026-10-24【临时调试·音量排查】音频输出数字幅度探针（串口字段 30）
+    //   目的：实测"每个音量档"的音频输出平均幅度，判断 50% 档是否真的比 60% 档大。
+    //   取 hdmi_audio_left[23:8]（= sfx_player 输出的 16 位采样，左右声道相同），
+    //   每 8192 个采样（48 kHz ⇒ 171 ms）算一次平均绝对值（≈ RMS 的线性版），
+    //   再两级同步到 50 MHz 控制域，送 dbg_report 的字段 30。
+    //   ★ 调完删掉本段 + 把字段 30 还原成 sub_ft。
+    wire signed [15:0] aud_mon     = hdmi_audio_left[23:8];
+    wire        [16:0] aud_mon_abs = aud_mon[15] ? (~{aud_mon[15], aud_mon} + 17'd1)
+                                                 : {1'b0, aud_mon};
+    reg  [28:0] aud_sum;
+    reg  [12:0] aud_win_cnt;
+    reg  [16:0] aud_avg_out;
+    always @(posedge clk_pix or negedge disp_rst_n) begin
+        if (!disp_rst_n) begin
+            aud_sum     <= 29'd0;
+            aud_win_cnt <= 13'd0;
+            aud_avg_out <= 17'd0;
+        end
+        else if (hdmi_audio_valid) begin
+            if (aud_win_cnt == 13'd8191) begin
+                aud_avg_out <= aud_sum[28:13];      // 8192 个采样的平均绝对值
+                aud_sum     <= 29'd0;
+                aud_win_cnt <= 13'd0;
+            end
+            else begin
+                aud_sum     <= aud_sum + {12'd0, aud_mon_abs};
+                aud_win_cnt <= aud_win_cnt + 13'd1;
+            end
+        end
+    end
+    reg [16:0] aud_avg_s1, aud_avg_s2;
+    always @(posedge clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin aud_avg_s1 <= 17'd0; aud_avg_s2 <= 17'd0; end
+        else            begin aud_avg_s1 <= aud_avg_out; aud_avg_s2 <= aud_avg_s1; end
+    end
+    wire [15:0] aud_avg_dbg = aud_avg_s2[15:0];   // 最大 32768 = 0x8000，16 位放得下
+
+
     //  5b. 【已删除】逐像素自检 `pix_check`（2026-10-15 逐步减重·第①步）
 
     // ============================================================
@@ -5860,8 +5898,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
                 end
 
                 // ★ 2026-10-24：字幕优先——字幕还欠着装就先别抢 SD（否则字幕要等音频 0.4 s）
-                else if (load_done_latch && !aud_loaded && !aud_fail
-                         && !sub_req_pend && !sub_pend_w) begin
+                else if (load_done_latch && !aud_loaded && !aud_fail) begin
 
                     aud_wait <= 26'd0;
 
@@ -5893,7 +5930,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
                 //     （字幕那边本来就有 `!aud_load_pulse`），
                 //     再加 `!a_start_use` 防"图像启动那一拍"被抢。
                 else if (!img_hold && !tr_active && !a_busy && !req_pend_w && !aud_busy_w
-                         && !sub_pend_w && !sub_load_pulse && !a_start_use) begin
+                         && !sub_load_pulse && !a_start_use) begin
 
                     if (aud_wait >= aud_wait_need) begin   // ★ 换音频时不再白等 1 秒
 
@@ -6509,6 +6546,20 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     };
 
+    // ============================================================
+    //  ★★★ 2026-10-24【D5_audback 定位】串口字段 31 临时改送【音频 FSM 卡住判据位图】
+    //   现象：aud_st 卡在 1（在等装载时机）、aud_loaded=0 ⇒ 把 aud_st==1 分支那 8 个
+    //         门信号的原始电平一次采回来，看是哪一根一直不落（或脉冲卡死）。
+    //   引脚：bit0 img_hold / bit1 tr_active / bit2 a_busy / bit3 req_pend_w
+    //         bit4 a_start_use / bit5 aud_busy_w / bit6 sub_load_pulse / bit8:7 sub_st
+    //   判读：连读几帧，哪一位恒为 1 = 它把 aud_st==1 的门堵死。
+    //   原来这里接的是字幕超时次数 sub_rt（字幕链路已定版，暂时让位；查完还原）。
+    // ============================================================
+    wire [15:0] aud_gate_dbg = {
+        7'd0, sub_st, sub_load_pulse, aud_busy_w, a_start_use,
+        req_pend_w, a_busy, tr_active, img_hold
+    };
+
 
 
     // ============================================================
@@ -6763,9 +6814,9 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
         //   ⇒ 这一版既有显示、又有音频，一次烧录就能同时判这两条。
 
-        .sb_rise (sub_ft),         // ★ 字幕传输帧数（发起→完成）
+        .sb_rise (aud_avg_dbg),    // ★★★ 2026-10-24 临时调试：音频数字平均幅度（原：字幕传输帧数 sub_ft）
 
-        .sb_col  (sub_rt),         // ★ 字幕超时次数
+        .sb_col  (aud_gate_dbg),   // ★★★ 2026-10-24 临时：音频 FSM 门信号位图（原：字幕超时 sub_rt）
 
         .rv_col  (aud_dbg_sum[15:0]),
 
