@@ -20,6 +20,9 @@ transcript
 _serial_logs/
 wave/
 
+# ---- 仿真产物（tb_menu_cn 每次跑都会重写 menu_cn.ppm）----
+sim/menu_cn.ppm
+
 # ---- 随手放的备份 ----
 *.bak
 *.orig
@@ -34,3 +37,6 @@ sim/work*/
 sim/_work*/
 sim/lint3/
 prj/M2_Runs/
+
+# ---- tools\build.ps1 / burn.ps1 的运行日志（每次一个子目录 + 一个 .log）----
+logs/
