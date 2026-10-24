@@ -107,7 +107,7 @@ module disp_top #(
     //   ★ 域：都是 clk_pix 域的慢变电平（top_m2 里各打了两级同步），不需要再打拍。
     //   ★ 同样**不给默认值**（与 menu_on 那一组同口径）：漏接直接报"端口未连接"。
     input  wire [2:0]  menu_zoom_lv,  // 缩放档 0..5 ⇒ 行 0 的数值
-    input  wire [1:0]  menu_sel_aud,  // 音频条号 0..3 ⇒ 行 1 显示 sel_aud + 1 = 1..4
+    input  wire [1:0]  menu_sel_aud,  // （2026-10-24 起行 1 不再显示音轨号；端口保留，top_m2 铺线不动）
     // ★★★ 2026-10-17【音量进菜单】：行 2 `VOLUME` 的活值 0..15（两位十进制显示）
     input  wire [3:0]  menu_vol,
     // ★★★ 2026-10-17【亮度进菜单】：行 3 `BRIGHT` 的活值 0..15（15 = 原样）。
@@ -612,6 +612,8 @@ module disp_top #(
         .menu_on(menu_on), .menu_sel(menu_sel),
         // ★★★ 2026-10-15【参数菜单·第2步】把两个活值送进菜单层去查字模（纯接线、只读）
         .zoom_lv(menu_zoom_lv), .sel_aud(menu_sel_aud),
+        // ★★★ 2026-10-24【行 1 换成可视化开关】：面板显示 ON/OFF 用（真实开关在 top_m2 的 viz_on）
+        .viz_on(menu_viz_on),
         // ★★★ 2026-10-17【音量/亮度进菜单】行 2 的音量、行 3 的亮度
         .vol_lv(menu_vol),
         .bri_lv(menu_bri)

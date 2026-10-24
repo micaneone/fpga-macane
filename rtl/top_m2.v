@@ -2041,19 +2041,15 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
             // ============================================================
 
-            // ★★★ 2026-10-17【亮度进菜单】：可调行 = 0（ZOOM）/ 2（VOLUME）/ **3（BRIGHT）**。
+            // ★★★ 2026-10-24【行 1 改成「可视」开关】：4 行全部可调
 
-            //   行 1（AUDIO）只显示、不可调（音频条由 SW3 换），所以这里要精确列出可调行。
+            //   （0 ZOOM / 1 VISUAL / 2 VOLUME / 3 BRIGHT）⇒ 只有"菜单关掉"才强制退出调节态。
 
-            // ★★★ 2026-10-18【可视化开关进菜单】：可调行 = 0（ZOOM）/ 2（VOLUME）/
+            //   （原式在这里列出 0/2/3 三个可调行、把行 1（AUDIO）排除在外 —— 已随音轨行一起删。）
 
-            //   **3（BRIGHT）** / **4（VISUAL，ON↔OFF 翻转）**；行 1（AUDIO）只显示不可调。
+            if (!menu_on)
 
-            if (!menu_on || ((menu_sel != 3'd0) && (menu_sel != 3'd2) &&
-
-                             (menu_sel != 3'd3)))
-
-                menu_edit <= 1'b0;                    // 菜单关 / 光标在不可调行（只有行 1）⇒ 自动退出调节
+                menu_edit <= 1'b0;                    // 菜单关 ⇒ 自动退出调节
 
             else if (key1_ok_press)
 
@@ -2632,15 +2628,25 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     wire bri_step  = menu_edit & key3_step_press & (menu_sel == 3'd3);  // ★ 同上：亮度（行 3 BRIGHT）
 
-    // ★★★ 2026-10-20【D1 · A2】：行 4 `VISUAL` 删了 ⇒ 可视化没有开关了，**常开**。
+    // ★★★ 2026-10-24【菜单行 1「音轨」→「可视」开关】：行 1 恢复成音频可视化总开关
 
-    //   留一根常量 `viz_on`（而不是把下游全改成 1'b1）：这样串口遥测的 33 字段格局、
+    //   （2026-10-20 D1 曾把行 4 `VISUAL` 删掉、可视化改常开；用户 2026-10-24 要求
 
-    //   `viz_s1/viz_s2` 两级同步、`disp_top.menu_viz_on` 端口都不动；
+    //     「菜单音轨取消，换成音频可视化的开关」⇒ 复用行 1，手势与其它可调行同构，
 
-    //   将来想把开关放回去，只需恢复原来那段 reg + always。
+    //      但它是布尔量：调节态里每按一次 KEY3 就 ON↔OFF 翻转，不跟 SW1 方向）。
 
-    wire viz_on = 1'b1;                                                 // 1 = 显示 / 0 = 关闭
+    //   · 上电/软复位默认 **1 = 显示**（= 加这个开关之前的行为，绝不影响现有观感）；
+
+    //   · 用**引脚复位** rst_n、和音量/亮度同一口径 ⇒ KEY4 软复位后保留；
+
+    //   · 串口字段 21 bit9 = viz_on（`dbg_caro_word` 里本来就有这一位）⇒ 不开屏也能看状态；
+
+    //   · 后台 viz_time 照样跑（它只旁听音频），重新打开立刻有图。
+
+    wire viz_step = menu_edit & key3_step_press & (menu_sel == 3'd1);  // ★ 行 1：ON↔OFF 翻转（不看方向）
+
+    reg  viz_on;                                                        // 1 = 显示 / 0 = 关闭
 
 
 
@@ -2649,6 +2655,8 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
         if (!rst_n) begin
 
             zoom_lv <= 3'd0;
+
+            viz_on  <= 1'b1;                       // ★ 2026-10-24：可视化上电默认开（= 加开关之前的行为）
 
         end
 
@@ -2659,6 +2667,12 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
             if (menu_dir) zoom_lv <= (zoom_lv == 3'd5) ? 3'd0 : (zoom_lv + 3'd1);
 
             else          zoom_lv <= (zoom_lv == 3'd0) ? 3'd5 : (zoom_lv - 3'd1);
+
+        end
+
+        else if (viz_step) begin
+
+            viz_on <= ~viz_on;                    // ★ 行 1 开关：每按一次 KEY3 翻转（只有两态，不分方向）
 
         end
 
@@ -4725,7 +4739,8 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
         // ★★★ 2026-10-15【参数菜单·第2步】菜单里要显示的活值（像素域同步副本、只读）
 
-        //   zoom_lv ⇒ 行 0 `ZOOM` 的数值（0..5）；sel_aud+1 ⇒ 行 1 `AUDIO` 的数值（1..4）
+        //   zoom_lv ⇒ 行 0 `ZOOM` 的数值（0..5）；行 1 = 可视化开关（2026-10-24 起显示 开/关，
+        //   原来这里送的是 sel_aud+1 音轨号）
 
         //   ★ 菜单关闭时这两根只是"没人看的电平"（menu_ovl 里被 menu_on 门掉）。
 
