@@ -2436,9 +2436,9 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     //   把转场/装载打崩、`fail_latch` 置位（一次上板就抓到了）。
 
-    localparam [27:0]  CARO_TICKS = CARO_MS * 50_000;        // 50 MHz ⇒ 150,000,000
+    localparam [31:0]  CARO_TICKS = CARO_MS * 50_000;        // 50 MHz ⇒ 150,000,000
 
-    reg  [27:0] caro_cnt;
+    reg  [31:0] caro_cnt;
 
     // ★★★ 2026-10-20【D1 · A3】：上电默认 = **1'b1（自动轮播）**。
 
@@ -2466,7 +2466,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     reg         auto_caro;                                   // 轮播开关
 
-    wire        caro_tick = (caro_cnt >= (CARO_TICKS - 28'd1));
+    wire        caro_tick = (caro_cnt >= (CARO_TICKS - 32'd1));
 
     // ★★★ 空闲闸门（两道）：
 
@@ -2496,7 +2496,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
             auto_caro <= CARO_ON_AT_BOOT;
 
-            caro_cnt  <= 28'd0;
+            caro_cnt  <= 32'd0;
 
         end
 
@@ -2506,15 +2506,15 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
             if (key3_step_press && !menu_on) auto_caro <= ~auto_caro;
 
-            if (!auto_caro)      caro_cnt <= 28'd0;
+            if (!auto_caro)      caro_cnt <= 32'd0;
 
             // 轮播自己发过请求、或用户手动按了 KEY2（换下一张）⇒ 都重新计时，
 
             // 免得"手按完 0.2 秒又自动换一张"
 
-            else if (adv_req_w || (key1_ok_press && !menu_on)) caro_cnt <= 28'd0;
+            else if (adv_req_w || (key1_ok_press && !menu_on)) caro_cnt <= 32'd0;
 
-            else if (!caro_tick) caro_cnt <= caro_cnt + 28'd1;
+            else if (!caro_tick) caro_cnt <= caro_cnt + 32'd1;
 
         end
 
