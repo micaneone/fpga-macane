@@ -73,8 +73,8 @@ module menu_ovl_cn #(
     input  wire [2:0]  zoom_lv,       // 0..5
     input  wire [1:0]  sel_aud,       // （2026-10-24 起不再显示：行 1 换成可视化开关；端口保留，disp_top 铺线不动）
     input  wire        viz_on,        // ★ 2026-10-24：行 1 = 音频可视化总开关（1 = 显示 / 0 = 关闭）
-    input  wire [5:0]  vol_lv,        // 0..33（2026-10-24 起改 33 级，33 = 满档）
-    input  wire [3:0]  bri_lv         // 0..10
+    input  wire [3:0]  vol_lv,        // 0..15
+    input  wire [3:0]  bri_lv         // 0..15
 );
 
     // ============================================================
@@ -189,32 +189,19 @@ module menu_ovl_cn #(
         endcase
     end
 
-    // 数值：缩放 = 一位数字（0..5）；可视 = 开 / 关；
-    //   ★ 2026-10-24【33 级音量】：音量改成 0..33 档，直接显示档位数字（两位右对齐，33 = 满档）
-    //   ★ 亮度仍是 0..10 档、每档 10%，显示成 "50%"
-    //   字格 0/1 = 标签，2 = 固定空白（分隔），3..6 = 数值右对齐
+    // 数值：缩放 = 一位数字（0..5）；可视 = 开 / 关；音量/亮度 = 百分比（0% / 50% / 100%）
+    //   ★ 2026-10-21：音量、亮度改成 0..10 档、每档 10%，显示成 "50%"
+    //   字格 0/1 = 标签，2 = 固定空白（分隔），3..6 = 数值右对齐（最右 6 格放 '%'）
+    //   ⇒ "0%" 占 5/6、"50%" 占 4/5/6、"100%" 占 3/4/5/6，不用除法（档位就是十位数）
     reg [4:0] v_c3, v_c4, v_c5, v_c6;
     reg [4:0] lv10;
-    reg [5:0] vol_v;
-    reg [5:0] vol_ones;
-    reg [1:0] vol_tens;
     always @(*) begin
         v_c3 = CH_BLANK; v_c4 = CH_BLANK; v_c5 = CH_BLANK; v_c6 = CH_BLANK;
-        lv10 = 5'd0; vol_v = 6'd0; vol_ones = 6'd0; vol_tens = 2'd0;
         case (row_now)
             3'd0: v_c6 = CH_0 + {2'b00, zoom_lv};              // 0..5 适配/1x/1.5x/2x/3x/4x
             3'd1: v_c6 = viz_on ? CH_ON : CH_OFF;              // 开 / 关（2026-10-24：行 1 = 可视化总开关）
-            3'd2: begin                                        // ★ 音量：0..33 档位数字（十位/个位）
-                vol_v = vol_lv;
-                if (vol_v >= 6'd30)      begin vol_tens = 2'd3; vol_ones = vol_v - 6'd30; end
-                else if (vol_v >= 6'd20) begin vol_tens = 2'd2; vol_ones = vol_v - 6'd20; end
-                else if (vol_v >= 6'd10) begin vol_tens = 2'd1; vol_ones = vol_v - 6'd10; end
-                else                     begin vol_tens = 2'd0; vol_ones = vol_v;         end
-                v_c6 = CH_0 + vol_ones[3:0];                                        // 个位
-                v_c5 = (vol_tens == 2'd0) ? CH_BLANK : (CH_0 + {3'd0, vol_tens});   // 十位（<10 不显示）
-            end
-            default: begin                                     // 亮度：百分比 0..10 档
-                lv10 = {1'b0, bri_lv};                         // 0..10
+            default: begin
+                lv10 = (row_now == 3'd2) ? {1'b0, vol_lv} : {1'b0, bri_lv};   // 0..10
                 v_c6 = CH_PCT;
                 v_c5 = CH_0;                                   // 个位恒 0（10% 一档）
                 if (lv10 == 5'd10) begin                       // 100%
