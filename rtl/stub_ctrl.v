@@ -103,7 +103,12 @@ module stub_ctrl #(
     input  wire        pf_go,          // ← 顶层：允许预装（音频自检做完 / 音频关掉）
     input  wire        a_load_done,    // ← 顶层：A 装完一整张图（单拍）
     output wire        pf_ready_o,     // → 顶层：后台槽已装好"下一张"（电平）
-    output wire        req_accept_o    // → 顶层：本次请求被受理（单拍，音效挂它）
+    output wire        req_accept_o,   // → 顶层：本次请求被受理（单拍，音效挂它）
+    // ★★★ 2026-10-24【一图一乐】本次请求对应"这张图是第几张"（与 req_accept_o 同拍有效）
+    //   · 快路（后台槽已预装好 / 正在预装）⇒ 图就是后台槽那张 ⇒ 取当前的 a_skip
+    //   · 慢路（要真去 SD 装）⇒ 图是 ② 号装载将要写的 next_no
+    //   顶层用它算"第 k 张图配第 (k mod SFX_NUM) 首音乐"。
+    output reg  [3:0]  req_skip_o
 );
 
     // ============================================================
@@ -211,6 +216,9 @@ module stub_ctrl #(
             pf_armed      <= 1'b0;
             pf_settle     <= 16'd0;
             req_accept    <= 1'b0;
+
+            // ★★★ 2026-10-24【一图一乐】复位清掉"本次请求的图序号"
+            req_skip_o    <= 4'd0;
             tr_active_d   <= 1'b0;
         end
         else begin
@@ -244,6 +252,13 @@ module stub_ctrl #(
                 pf_armed  <= 1'b1;
                 // ★ 给顶层的一拍脉冲：音效挂它（按键那一下响，不是预装那一刻响）
                 req_accept <= 1'b1;
+                // ★★★ 2026-10-24【一图一乐】同拍给出"这次请求对应哪张图"：
+                //   · 快速路（后台槽已装好 / 预装还在路上）⇒ 图 = 后台槽里那张 = a_skip
+                //     （a_skip 是上一次装载/预装刚写进去的那张）
+                //   · 慢速路（这一拍要真去 SD 装）⇒ 图 = ② 马上要写的 next_no
+                //   判据与上面 need_load 同源，保证"图序号"和"装不装"不打架。
+                req_skip_o <= ((pf_ready | load_inflight) & ~force_load)
+                              ? a_skip : next_no[3:0];
                 if (AUTO_START && !auto_fired && (auto_cnt >= AUTO_TICKS[31:0])) begin
                     req_pend   <= 1'b1;
                     req_tgl    <= ~req_tgl;

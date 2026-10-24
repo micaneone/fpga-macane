@@ -1030,6 +1030,14 @@ module top_m2 #(
 
     reg  alarm_audio_ok;
 
+    // ★★★ 2026-10-24【一图一乐】u_ctrl 给出的"本次请求那张图的序号"（与 req_accept_w 同拍）
+
+    wire [3:0] req_skip_w;
+
+    // 图 k ⇒ 第 (k mod SFX_NUM) 首音乐（卡上 4 首音乐、5 张图 ⇒ 第 5 张回到第 1 首）
+
+    wire [SEL_AUD_W-1:0] req_aud_mod = req_skip_w % SFX_NUM;
+
 
 
     wire [3:0]  a_sd_skip  = (img_load_pulse || img_hold || alert_on) ? 4'd0 :
@@ -3178,7 +3186,8 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
         .pf_go(pf_go_w), .a_load_done(a_load_done_dly),
 
-        .pf_ready_o(pf_ready_w), .req_accept_o(req_accept_w)
+        .pf_ready_o(pf_ready_w), .req_accept_o(req_accept_w),
+        .req_skip_o (req_skip_w)        // ★★★ 2026-10-24【一图一乐】这张图是第几张（与 req_accept 同拍）
 
     );
 
@@ -5768,6 +5777,26 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
             //   ★ 注意：这里要放在下面 case 之前 —— 同一 always 里后赋值优先，
 
             //     `aud_st==2` 分支的 `aud_play_req <= 1'b1` 必须能覆盖这一句。
+
+            // ★★★ 2026-10-24【一图一乐】换图 ⇒ 音乐跟着换（第 k 张图配第 (k mod SFX_NUM) 首）
+            //   · u_ctrl 在受理请求那一拍给出"这张图是第几张"(req_skip_w)，这里换算成音乐序号；
+            //   · req_aud_mod == sel_aud 说明"这张图的配乐就是当前这首"⇒ 什么都不做；
+            //   · 否则用的是和下面 SW3 切歌完全一样的三件套：清 loaded/fail、进 1 态重新装、
+            //     先 stop —— 音频 FSM 会自己走"重装 WAV → 从头播 → 循环"，不用另写通路；
+            //   · 报警期间（alert_on）不抢：报警音由下面"报警边沿"块负责，退出报警后那张图的
+            //     换图请求会再进来一次（img_req_pend 的 alert_fall 边沿），配乐自然跟上；
+            //   · 只在 (aud_loaded || aud_fail) 时才算"换歌"：正在装载/等待时不动它
+            //     （state2 的 a_sd_skip 在装载开始那拍已经锁定了，半路改只会更乱）。
+            if (req_accept_w && !alert_on && (req_aud_mod != sel_aud)) begin
+                sel_aud <= req_aud_mod;
+                if (aud_loaded || aud_fail) begin
+                    aud_loaded   <= 1'b0;
+                    aud_fail     <= 1'b0;
+                    aud_st       <= 2'd1;
+                    aud_wait     <= 26'd0;
+                    aud_stop_req <= 1'b1;
+                end
+            end
 
             // ★★★ 2026-10-14【重新打开"重装"】+【音频块 512 字】= 全套修复：
 
