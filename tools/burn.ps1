@@ -99,7 +99,10 @@ $start = Get-Date
 Write-Host '>>> flashing (SRAM download, expect ~7 s)...' -ForegroundColor Cyan
 Push-Location $runDir
 try {
-    $out = & $TdExe $tclPath *>&1
+    # TD's command-line parser eats backslashes in a path argument
+    # ("E:\..\download.tcl" -> "E:...download.tcl"), so pass forward slashes.
+    $tclArg = $tclPath -replace '\\', '/'
+    $out = & $TdExe $tclArg *>&1
     $rc  = $LASTEXITCODE
 } finally {
     Pop-Location

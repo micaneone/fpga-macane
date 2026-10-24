@@ -99,13 +99,17 @@ exit
 $tclText = $tclTemplate.Replace('__PRJ__', $prjF).Replace('__AL__', $alF)
 $tclPath = Join-Path $runDir 'build.tcl'
 [IO.File]::WriteAllText($tclPath, ($tclText + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+# NOTE: the tcl file name must be passed to TD with FORWARD slashes.
+#   TD's command-line parser eats backslashes ("E:\...\build.tcl" arrives as
+#   "E:...build_2026...build.tcl" -> "couldn't read file").  Learned 2026-10-24.
+$tclArg = $tclPath -replace '\\', '/'
 
 # ---- 3. run ---------------------------------------------------------------
 $start = Get-Date
 Write-Host '>>> running TD (expect ~2 min)...' -ForegroundColor Cyan
 Push-Location $runDir
 try {
-    $out = & $TdExe $tclPath *>&1
+    $out = & $TdExe $tclArg *>&1
     $rc  = $LASTEXITCODE
 } finally {
     Pop-Location
