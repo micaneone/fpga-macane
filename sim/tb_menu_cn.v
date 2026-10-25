@@ -6,7 +6,8 @@
 //  仿真里看见**，不能靠烧板子猜。
 //
 //  2026-10-25 第 5 行（清晰 / 分辨率）后同步改扫描窗口：
-//      扫 x=0..200、y=0..240（第 5 格底边 y=236，四周留 4~8 px 看是否漏出底色）。
+//      扫 x=0..200、y=0..286（第 6 格底边 y=281，四周留 4~8 px 看是否漏出底色）。
+//      选中行 = 行 5（字幕）⇒ 蓝/红粗框落在那行，顺便验证第 6 行接线。
 //      选中行 = 行 4（清晰）⇒ 蓝/红粗框落在那行，顺便验证第 5 行接线。
 //
 //  产出：sim/menu_cn.ppm（蓝框）/ menu_cn_edit.ppm（确认后红框）
@@ -23,7 +24,7 @@ module tb_menu_cn;
 
     // ---- 扫描窗口（5 格占 x=12..196、y=12..236，四周留余量）----
     localparam integer X0 = 0,   X1 = 200;
-    localparam integer Y0 = 0,   Y1 = 240;
+    localparam integer Y0 = 0,   Y1 = 286;
 
     localparam [15:0] BG      = 16'h1082;   // 背景（深蓝灰，用来区分"直通"）
     localparam [15:0] C_INK   = 16'hFFC2;   // 文字
@@ -39,8 +40,9 @@ module tb_menu_cn;
 
     reg        menu_on  = 1;
     reg        menu_edit = 1'b0;   // ★ 0 = 候选态（蓝框）/ 1 = KEY2 确认后的调节态（红框）
-    reg [2:0]  menu_sel = 3'd4;    // 选中第 5 行「清晰」（2026-10-25 加的）
+    reg [2:0]  menu_sel = 3'd5;    // 选中第 6 行「字幕」（2026-10-25 加的）
     reg        menu_res_1024 = 1'b1;  // ★ 1 = 1024×768 镜像（显示 1024）/ 0 = 800×600
+    reg        menu_sub_on = 1'b1;    // ★ 1 = 字幕显示 / 0 = 关闭（第 6 行显示用）
     reg [2:0]  zoom_lv  = 3'd2;    // 缩放 = 2
     reg [1:0]  sel_aud  = 2'd2;    // 不再显示（端口保留）
     reg        viz_on   = 1'b1;    // 可视 = 开
@@ -60,6 +62,7 @@ module tb_menu_cn;
         .px_out(px_out), .de_out(de_out), .vs_out(vs_out),
         .menu_on(menu_on), .menu_sel(menu_sel), .menu_edit(menu_edit),
         .menu_res_1024(menu_res_1024),
+        .menu_sub_on(menu_sub_on),
         .zoom_lv(zoom_lv), .sel_aud(sel_aud), .viz_on(viz_on),
         .vol_lv(vol_lv), .bri_lv(bri_lv)
     );
@@ -130,9 +133,9 @@ module tb_menu_cn;
         menu_on = 1'b1;
         @(posedge clk);
         bad = 0;
-        // 5 格 y = 12..51 / 58..97 / 104..143 / 150..189 / 196..235
-        // 缝 y = 52..57 / 98..103 / 144..149 / 190..195
-        for (k = 0; k < 4; k = k + 1) begin
+        // 6 格 y = 12..51 / 58..97 / 104..143 / 150..189 / 196..235 / 242..281
+        // 缝 y = 52..57 / 98..103 / 144..149 / 190..195 / 236..241
+        for (k = 0; k < 5; k = k + 1) begin
             for (j = 52 + 46 * k; j < 58 + 46 * k; j = j + 1) begin
                 for (i = X0; i < X1; i = i + 1) begin
                     scan_px(i[11:0], j[11:0], 16'h3C1E, got);
