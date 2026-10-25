@@ -7156,11 +7156,11 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
     //  ------------------------------------------------------------
     //  ★ 2026-10-25【用户需求】这块在 2026-10-17 为省面积整块删过（约 200 LUT），
     //     现在按需求加回精简版：不再接 a_dbg_wr_cnt，只接 a_img_no / auto_caro。
-    //  位分配（沿用旧代码约定：digit5 = 最左边）：
-    //     digit5 = 状态：A = 自动轮播中，P = 已暂停（KEY3 在非菜单时开关轮播）
-    //     digit4/3/2 = 空
-    //     digit1 = 图号十位
-    //     digit0 = 图号个位
+    //  位分配（★ 2026-10-25 实测修正：板上实际是 digit0 = 最左边，与旧注释相反）：
+    //     digit0/1/2 = 分辨率（百/十/个）：宽度<1000 显示宽度；宽度≥1000 改显示高度
+    //     digit3     = 状态：A = 自动轮播中，P = 已暂停（KEY3 在非菜单时开关轮播）
+    //     digit4     = 图号十位
+    //     digit5     = 图号个位（最右）
     //  a_img_no 是 1 基序号（第 1 张 = 1），开机还没装过图时显示 00。
     // ============================================================
     //  图号：超过 99 截到 99（两位物理上限）
@@ -7184,12 +7184,12 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
     seg_scan #(.SCAN_FREQ(200), .CLK_FREQ(50_000_000)) u_seg (
         .clk(clk), .rst_n(sys_rst_n),
         .seg_sel(seg_sel), .seg_data(seg_data),
-        .seg_data_0({1'b1, seg_od}),                    // 图号个位（最右）
-        .seg_data_1({1'b1, seg_td}),                    // 图号十位
-        .seg_data_2(auto_caro ? SEG_AUTO : SEG_PAUSE),  // 状态
-        .seg_data_3({1'b1, seg_ro}),                    // 分辨率 个位
-        .seg_data_4({1'b1, seg_rt}),                    // 分辨率 十位
-        .seg_data_5({1'b1, seg_rh})                     // 分辨率 百位（最左）
+        .seg_data_0({1'b1, seg_rh}),                    // 分辨率 百位（实际最左：板上 digit0 在最左）
+        .seg_data_1({1'b1, seg_rt}),                    // 分辨率 十位
+        .seg_data_2({1'b1, seg_ro}),                    // 分辨率 个位
+        .seg_data_3(auto_caro ? SEG_AUTO : SEG_PAUSE),  // 状态 A/P
+        .seg_data_4({1'b1, seg_td}),                    // 图号十位
+        .seg_data_5({1'b1, seg_od})                     // 图号个位（实际最右）
     );
 
 
