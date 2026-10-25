@@ -72,7 +72,7 @@ localparam IIC_SCL_DIV = (pic_wide == 800)  ? 400 :
 //  时序参数（★ 必须和 video_timing.v 里那一档【完全一致】）
 //    640x480  配 25.000MHz 像素时钟（@60，总长  800x525）
 //    800x600  配 40.000MHz 像素时钟（@60，总长 1056x628）← 现在用这一档
-//    1024x768 配 75.000MHz 像素时钟（@70，总长 1328x806）
+//    1024x768 配 65.000MHz 像素时钟（@60，总长 1344x806）← 2026-10-25 解锁实验
 //  核要这几个数的原因是：它自己按 HTOTAL/VTOTAL 生成 TMDS 里的行场时序，
 //  我们的 de / vs 只告诉它"哪里是可见像素、哪里是帧首"。
 // ============================================================
@@ -87,7 +87,7 @@ localparam HPORCH  = (RES_ID == RES_1024x768) ? 12'd24  :
                      (RES_ID == RES_800x600 ) ? 12'd40  : 12'd16;   // 行前肩
 localparam HSYNC_W = (RES_ID == RES_1024x768) ? 12'd136 :
                      (RES_ID == RES_800x600 ) ? 12'd128 : 12'd96;   // 行同步宽度
-localparam BPORCH  = (RES_ID == RES_1024x768) ? 12'd144 :
+localparam BPORCH  = (RES_ID == RES_1024x768) ? 12'd160 :
                      (RES_ID == RES_800x600 ) ? 12'd88  : 12'd48;   // 行后肩
 localparam H_TOTAL = HPORCH + HSYNC_W + pic_wide + BPORCH;   // 640:800 / 800x600:1056 / 1024@70:1328
 

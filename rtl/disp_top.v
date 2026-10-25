@@ -235,7 +235,7 @@ module disp_top #(
     wire        vs, de;
     wire [11:0] pix_x, pix_y;
 
-    video_timing #(.pic_wide(800), .pic_high(600)) u_timing (
+    video_timing #(.pic_wide(1024), .pic_high(768)) u_timing (   // exp/res1024
         .clk(clk_pix), .rst_n(rst_pix_n),
         .hs(), .vs(vs), .de(de), .x(pix_x), .y(pix_y)
     );
@@ -394,7 +394,7 @@ module disp_top #(
     wire [23:0] viz_freq_color;
 
     viz_time #(
-        .N       (24),
+        .N       (31),                // ★ 1024×768 实验：24 → 31 段
         .SMP_WIN (1500),
         .GAIN    (6'd16)
     ) u_viz_hist (
@@ -430,10 +430,10 @@ module disp_top #(
     //     带高 24 → **48 px**，满格柱 **43 px**（H_SHIFT 回 0，改用钳位到带顶）。
     //     字幕 64 + 音谱 48 = **112 px = 屏高 18.7%**（v2 16% → v3 14.7% → v4 18.7%）。
     viz_render #(
-        .N          (24),                // ★ 32 → 24 段（每段更宽，像参考片的大方块）
+        .N          (31),                // ★ 1024×768 实验：24 → 31 段（31×32=992，两侧各 16）
         .CELL_SHIFT (5),                 // ★ 柱宽 16 → 32 px（画 26 px + 6 px 缝）
         .VIS_X      (10'd16),            // ★ 144 → 16（带宽 768，左右各 16 px）
-        .VIS_Y      (10'd480),           // ★ 464 → 496 → 504 → 480（底边 528 = 字幕上沿）
+        .VIS_Y      (10'd648),           // ★ 1024×768 实验：底边 696 = 字幕上沿（696-48）
         .BAR_H      (10'd48),            // ★ 64 → 32 → 24 → 48（带高）
         .H_SHIFT    (0),                 // ★ 0 = 不缩放（满格钳到带顶 47）
         .DECAY_DIV  (12000),
@@ -634,7 +634,7 @@ module disp_top #(
     //  HDMI（成品核，别动）
     // ============================================================
     my_hdmitop #(
-        .DEVICE("EG"), .pic_wide(800), .pic_high(600)
+        .DEVICE("EG"), .pic_wide(1024), .pic_high(768)   // exp/res1024
     ) u_hdmi (
         .I_pixel_clk (clk_pix),
         .I_pclk      (clk_par),

@@ -39,10 +39,10 @@ module alert_ovl (
     output reg  [15:0] px_out
 );
 
-    // ---- 边框几何（800×600，8 px）----
+    // ---- 边框几何（1024×768，8 px）----
     localparam [11:0] BORDER = 12'd8;
-    localparam [11:0] X_END  = 12'd792;   // 800 - 8
-    localparam [11:0] Y_END  = 12'd592;   // 600 - 8
+    localparam [11:0] X_END  = 12'd1016;  // 1024 - 8
+    localparam [11:0] Y_END  = 12'd760;   // 768 - 8
 
     // ---- 闪烁节拍：30 帧 = 0.5 s @60 Hz ----
     localparam [5:0] HALF_FRAMES = 6'd30;

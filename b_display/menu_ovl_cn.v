@@ -39,8 +39,8 @@
 `timescale 1ns / 1ps
 
 module menu_ovl_cn #(
-    parameter integer SCR_W   = 800,
-    parameter integer SCR_H   = 600,
+    parameter integer SCR_W   = 1024,
+    parameter integer SCR_H   = 768,
     parameter integer ROW_N   = 4,      // ★ 必须和 top_m2 的 MENU_N 一致
     parameter integer CELL_X0 = 12,     // 第一个小格左上角（屏幕坐标）
     parameter integer CELL_Y0 = 12,

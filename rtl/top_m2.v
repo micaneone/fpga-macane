@@ -809,9 +809,9 @@ module top_m2 #(
 
     // 暂定位置：800×64 的字幕条贴在屏幕底部（y = 600 - 64 - 8 = 528）、横向居中
 
-    localparam [11:0] SUB_X0_DFLT = 12'd0;
+    localparam [11:0] SUB_X0_DFLT = 12'd112;    // ★ 1024×768：800 宽字幕带水平居中
 
-    localparam [11:0] SUB_Y0_DFLT = 12'd528;      // ★ 还原：原来是 12'd1000（屏外）
+    localparam [11:0] SUB_Y0_DFLT = 12'd696;      // ★ 1024×768：768-64-8 = 696
 
     localparam [11:0] SUB_W_DFLT  = 12'd800;      // 契约 ART_SUB_W
 
@@ -4462,7 +4462,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     stub_win_table #(
 
-        .WIN_X0(0), .WIN_Y0(0), .WIN_W(800), .WIN_H(600)
+        .WIN_X0(0), .WIN_Y0(0), .WIN_W(1024), .WIN_H(768)
 
     ) u_win (
 
@@ -5769,7 +5769,10 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
             //     所以"同拍既置位又受理"时以"受理并清零"为准（正是我们要的）。
 
-            if (sw3_change) sw3_pend <= 1'b1;
+            // ★★★ 2026-10-25【MULTI BOOT】SW3 改为「切显示分辨率」，手动切歌停用：
+            //   音乐现在由「一图一乐」跟着图片自动走（图 k ⇒ 第 k 首），不再需要拨开关。
+            //   拨 SW3 只登记一次分辨率切换请求，等到「下一张图」的请求到来时才重配置位流。
+            if (1'b0) sw3_pend <= 1'b1;
 
             // ---- 什么时候响一次音效 ----
 
@@ -5873,7 +5876,9 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
             //   ★ 对正常路径逐位无影响：`aud_loaded=1, aud_fail=0` 时条件与原式等价。
 
-            if ((sw3_pend || sw3_change) && (aud_loaded || aud_fail)) begin
+            // ★★★ 2026-10-25【MULTI BOOT】SW3 改作切分辨率 ⇒ 音频手动切歌分支停用
+            //   （保留块体只为让下面的注释/历史可查；条件恒假，TD 会整块优化掉。）
+            if (1'b0) begin
 
                 aud_loaded <= 1'b0;        // 让它重走装载（= 音效也像图片一样每次刷新）
 
@@ -7226,5 +7231,50 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
     end
     wire spk_gate = (spk_gate_cnt < 25'd20_000_000);
     assign spk = alert_on & spk_gate & spk_tone;
+
+    // ============================================================
+    //  ★★★ 2026-10-25【MULTI BOOT · SW3 切显示分辨率】
+    // ------------------------------------------------------------
+    //  · FLASH 里放两套位流（W25Q16，16 Mbit = 2 MB）：
+    //        0x000000：800×600 版（Primary）
+    //        0x0A0000：1024×768 版（Second）
+    //    每套 643 KB ≈ 10 个 64 KB 扇区，0x0A0000 之后正好放得下第二套。
+    //  · 拨 SW3 = 登记一次「切到另一套」的请求；**当前这张图不切**，
+    //    等轮播下一次请求换图（`adv_req_w`）时才把 `rebootn` 拉低 ⇒ FPGA 从
+    //    另一套位流的起始地址重新配置（黑屏约 0.2~0.4 s），随后换分辨率启动。
+    //  · 两套代码唯一的差别就是下面 `RES_JUMP_ADDR`：
+    //        800×600 版（烧 0x000000）填 8'h0A  → 跳到 1024×768
+    //        1024×768 版（烧 0x0A0000）填 8'h00 → 跳回 800×600
+    //    （`dynamic_addr` 是跳转地址的高 8 位：8'h0A = 0x0A0000，8'h00 = 0x000000。）
+    //  · 注意：加了 EG_LOGIC_MBOOT 之后，FLASH 必须用 `download -mode program_spi
+    //    -start_addr 0x…`（MULTI BOOT 模式）烧写，不能再走普通 JTAG 烧写。
+    // ============================================================
+    localparam [7:0] RES_JUMP_ADDR = 8'h00;   // ★ 本镜像 = 1024×768（烧 0x0A0000）
+
+    reg res_switch_pend;   // SW3 已拨过：等「下一张图」再切
+    reg mboot_reboot_n;    // EG_LOGIC_MBOOT 的 rebootn（低有效 = 从 FLASH 另一地址重载）
+
+    always @(posedge clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin
+            res_switch_pend <= 1'b0;
+            mboot_reboot_n  <= 1'b1;
+        end
+        else begin
+            if (sw3_change)
+                res_switch_pend <= 1'b1;                    // 只登记，这一张图**不动**
+            else if (res_switch_pend && adv_req_w) begin    // 「下一张图」的请求来了 → 此刻才切
+                res_switch_pend <= 1'b0;
+                mboot_reboot_n  <= 1'b0;                    // 拉低 = 重新配置
+            end
+        end
+    end
+
+    EG_LOGIC_MBOOT #(
+        .ADDR_SOURCE_SEL ("DYNAMIC"),
+        .STATIC_ADDR     (8'b00000000)
+    ) u_mboot (
+        .rebootn      (mboot_reboot_n),
+        .dynamic_addr (RES_JUMP_ADDR)
+    );
 
 endmodule

@@ -11,13 +11,13 @@
 
 ///////////////////////////////////////////////////////////////////////////////
 //	Input frequency:                50.000000MHz
-//	Clock multiplication factor: 4
-//	Clock division factor:       5
+//	Clock multiplication factor: 13
+//	Clock division factor:       10
 //	Clock information:
 //		Clock name	| Frequency 	| Phase shift
-//		C0        	| 40.000000 MHZ	| 0.0000  DEG  
-//		C1        	| 100.000000MHZ	| 90.0000 DEG  
-//		C2        	| 200.000000MHZ	| 0.0000  DEG  
+//		C0        	| 65.000000 MHZ	| 0.0000  DEG   (exp/res1024)
+//		C1        	| 162.500000MHZ	| 90.0000 DEG  
+//		C2        	| 325.000000MHZ	| 0.0000  DEG  
 ///////////////////////////////////////////////////////////////////////////////
 `timescale 1 ns / 100 fs
 
@@ -58,19 +58,19 @@ module PLL_0 (
     .KVCO(2),
     .LPF_CAPACITOR(2),
     .LPF_RESISTOR(8),
-    .REFCLK_DIV(5),
-    .FBCLK_DIV(4),
+    .REFCLK_DIV(10),
+    .FBCLK_DIV(13),
     .CLKC0_ENABLE("ENABLE"),
-    .CLKC0_DIV(25),
-    .CLKC0_CPHASE(24),
+    .CLKC0_DIV(15),
+    .CLKC0_CPHASE(14),
     .CLKC0_FPHASE(0),
     .CLKC1_ENABLE("ENABLE"),
-    .CLKC1_DIV(10),
-    .CLKC1_CPHASE(1),
+    .CLKC1_DIV(6),
+    .CLKC1_CPHASE(0),
     .CLKC1_FPHASE(4),
     .CLKC2_ENABLE("ENABLE"),
-    .CLKC2_DIV(5),
-    .CLKC2_CPHASE(4),
+    .CLKC2_DIV(3),
+    .CLKC2_CPHASE(2),
     .CLKC2_FPHASE(0) 
   ) pll_inst (
     .refclk(refclk),

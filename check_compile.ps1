@@ -92,7 +92,11 @@ $extra = @(
     # INIT_FILE=font_cn.dat).  The TD model in sim_release is encrypted AND
     # ignores INIT_FILE (verified 2026-10-25: reads all zeros), so use our own
     # behavioural stand-in that does $readmemb from the .dat file.
-    (Join-Path $m0 'eg_phy_bram32k_behav.v')
+    (Join-Path $m0 'eg_phy_bram32k_behav.v'),
+    # 2026-10-25: top_m2 now instantiates EG_LOGIC_MBOOT (MULTI BOOT reconfig,
+    # SW3 = switch display resolution).  TD has no sim model for it at all, so a
+    # plain behavioural stub keeps check_compile/sim working.
+    (Join-Path $m0 'eg_logic_mboot_behav.v')
 )
 
 # flat mirror: global_def.v is `include`d by path-less name
