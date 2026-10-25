@@ -13,6 +13,7 @@ location (`Split-Path -Parent $PSScriptRoot`).
 | `burn.ps1` | SRAM-downloads the bit (`download -bit`) and requires `PRG-2014 Chip validation success`. Archives a copy. `-ReadSeconds N -Port COM6` also decodes the serial frame afterwards. |
 | `flash.ps1` | **Persistent** upgrade: writes the bit into the on-board SPI FLASH (`program_spi` + `verify_spi`) so the board boots it stand-alone after a power cycle. Requires `bw_commands_prompt.exe` (not `td_...`). `-Bit <file> -Tag <label>`, `-NoVerify`, `-DryRun`. ~2 min. |
 | `check_filelist.ps1` | Cross-checks `prj\M2.al` against disk: missing files, duplicates, unlisted-but-referenced modules (build breakers), unlisted-and-unused files (dead code). |
+| `decode_frame.ps1 -Frame <132 hex>` | Decodes one serial frame offline (status bits, menu/carousel word, A-track load size, audio FSM + subtitle FSM, fail source, and the two temporary debug probes fields 30/31). Useful when the board is on someone else's desk or you saved a frame in a log. |
 
 ## Typical loop
 
