@@ -56,7 +56,7 @@ module sfx_ctrl #(
     input  wire        busy             // 来自 sdr_rd_arb（还在读/放）
 );
 
-    wire id_ok = (sfx_id < SFX_NUM[3:0]);       // 序号越界就不理
+    wire id_ok = (sfx_id < SFX_NUM);       // 序号越界就不理（★ 2026-10-25：不能写 SFX_NUM[3:0]——SFX_NUM=16 时 [3:0]=0，id_ok 恒 0 ⇒ 播放命令全被丢，整机没音乐）
 
     assign vol_out = volume;
 
