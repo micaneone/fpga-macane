@@ -308,7 +308,20 @@ module scaler_addr #(
     wire b_nxt_valid = win_on && src_b_valid
                      && (!yp_nxt_s[12]) && (v_b_nxt < src_b_h16);
 
-    reg [11:0] v_store0;     // 逻辑行号 -> 存储行号（VFLIP），行首算一次的临时量
+    // ★★ 2026-10-25【P0-1 时序】行请求改成【两级流水】——
+    //    原写法把 vq_m(乘) → v_store0 → row_s0(×wpl) → abs → wbase → align → words
+    //    在一个 40 MHz 周期里串完：综合后 u_disp/u_timing/h_cnt → l0b_words 实测
+    //    **28.047 ns / 25 ns 预算、16 级**（全工程唯一可修的像素域真违例）。
+    //    拆成：
+    //      一级（前台 pix_x==1 / 后台 pix_x==0）：只算 vq → v_store0、锁 u_last_w；
+    //      二级（前台 pix_x==2 / 后台 pix_x==1）：乘 wpl + 加基址 + 对齐 + 字数 + go。
+    //    ★ 行请求只是"给下一行发搬运单"，晚 1 个像素发完全没影响（一行 640 拍）；
+    //      align_px_cur 同样晚 1 拍更新，它只在【下一行】的 rd_index 里用，安全。
+    //    ★ 顺带把放大档的第二行改成 row_s0 − wpl（数学等价），省掉第二个乘法器。
+    reg         f_s1_v,   f_s1_bilin;
+    reg  [11:0] f_s1_vstore, f_s1_ulastw;
+    reg         b_s1_v,   b_s1_bilin;
+    reg  [11:0] b_s1_vstore, b_s1_ulastw;
 
     always @(posedge clk_pix or negedge rst_pix_n) begin
         if (!rst_pix_n) begin
@@ -317,6 +330,8 @@ module scaler_addr #(
             l0b_go <= 1'b0; l0b_wbase <= 21'd0; l0b_words <= 12'd0;
             l1b_go <= 1'b0; l1b_wbase <= 21'd0; l1b_words <= 12'd0;
             v_b_q  <= 32'd0;
+            f_s1_v <= 1'b0; f_s1_bilin <= 1'b0; f_s1_vstore <= 12'd0; f_s1_ulastw <= 12'd0;
+            b_s1_v <= 1'b0; b_s1_bilin <= 1'b0; b_s1_vstore <= 12'd0; b_s1_ulastw <= 12'd0;
         end
         else begin
             l0_go <= 1'b0;                    // 默认不给脉冲
@@ -324,16 +339,21 @@ module scaler_addr #(
             l0b_go <= 1'b0;
             l1b_go <= 1'b0;
 
-            // ★★ 前台的行请求挪到 pix_x==1（见上面分相位共用那一段）
-            if (pix_de && (pix_x == 12'd1) && nxt_valid) begin
-                // ★ 逻辑行号 -> 存储行号（VFLIP=1 时翻过来）
-                v_store0 = VFLIP ? (src_h - 12'd1 - v_nxt[11:0]) : v_nxt[11:0];
+            // ================= 一级：前台（pix_x==1）=================
+            if (pix_de && (pix_x == 12'd1)) begin
+                f_s1_v      <= nxt_valid;
+                f_s1_bilin  <= bilin_en;
+                f_s1_vstore <= VFLIP ? (src_h - 12'd1 - v_nxt[11:0]) : v_nxt[11:0];
+                f_s1_ulastw <= u_last_w;
+            end
 
-                row_s0   = src_base + ({9'd0, v_store0} * {9'd0, wpl});
+            // ================= 二级：前台（pix_x==2）=================
+            if (pix_de && (pix_x == 12'd2) && f_s1_v) begin
+                row_s0   = src_base + ({9'd0, f_s1_vstore} * {9'd0, wpl});
                 abs_w0   = row_s0 + {9'd0, u_first_w};
                 wbase0   = {abs_w0[20:2], 2'b00};               // 绝对 4 字对齐
                 align_w0 = row_s0 - wbase0;                     // 可为负
-                words_s0 = u_last_w + align_w0 + 16'sd1;
+                words_s0 = f_s1_ulastw + align_w0 + 16'sd1;
                 align_px_cur <= align_w0 <<< 1;                 // ×2 = 像素偏移
                 l0_wbase <= wbase0;
                 l0_words <= words_s0[11:0];
@@ -341,44 +361,48 @@ module scaler_addr #(
 
                 // 放大档才要第二行（逻辑行 v+1，翻转后就是存储行 v_store-1）；
                 // v+1 越界就不发（插值时 fv 会被钳成 0）
-                if (bilin_en && (v_store0 != 12'd0)) begin
-                    row_s1   = src_base + ({9'd0, (v_store0 - 12'd1)} * {9'd0, wpl});
+                if (f_s1_bilin && (f_s1_vstore != 12'd0)) begin
+                    row_s1   = row_s0 - {9'd0, wpl};            // (v_store-1)*wpl = row0 - wpl
                     abs_w1   = row_s1 + {9'd0, u_first_w};
                     wbase1   = {abs_w1[20:2], 2'b00};
                     align_w1 = row_s1 - wbase1;
                     l1_wbase <= wbase1;
-                    l1_words <= (u_last_w + align_w1 + 16'sd1);
+                    l1_words <= (f_s1_ulastw + align_w1 + 16'sd1);
                     l1_go    <= 1'b1;
                 end
             end
 
-            // ★★ 第二路（后台）：在 pix_x==0 那一拍干活 ——
+            // ================= 一级：后台（pix_x==0）=================
             //    这一拍上 vq_m / u_last_q 才是【后台】那套的值（分相位共用），
             //    同时把后台"本行"的 v 寄存下来（行内用它，行首那次旁路）。
             if (pix_de && (pix_x == 12'd0)) begin
-                v_b_q <= vq_m;                        // 后台本行的 v（行内用）
+                v_b_q       <= vq_m;                    // 后台本行的 v（行内用）
+                b_s1_v      <= b_nxt_valid;
+                b_s1_bilin  <= bilin_en;
+                b_s1_vstore <= VFLIP ? (src_b_h - 12'd1 - v_b_nxt[11:0]) : v_b_nxt[11:0];
+                b_s1_ulastw <= b_u_last_w;
+            end
 
-                if (b_nxt_valid) begin
-                    b_v_store0 = VFLIP ? (src_b_h - 12'd1 - v_b_nxt[11:0]) : v_b_nxt[11:0];
-                    b_row_s0   = src_b_base + ({9'd0, b_v_store0} * {9'd0, b_wpl});
-                    b_abs_w0   = b_row_s0 + {9'd0, b_u_first_w};
-                    b_wbase0   = {b_abs_w0[20:2], 2'b00};
-                    b_align_w0 = b_row_s0 - b_wbase0;
-                    b_words0   = b_u_last_w + b_align_w0 + 16'sd1;
-                    b_align_px_cur <= b_align_w0 <<< 1;
-                    l0b_wbase <= b_wbase0;
-                    l0b_words <= b_words0[11:0];
-                    l0b_go    <= 1'b1;
+            // ================= 二级：后台（pix_x==1）=================
+            if (pix_de && (pix_x == 12'd1) && b_s1_v) begin
+                b_row_s0   = src_b_base + ({9'd0, b_s1_vstore} * {9'd0, b_wpl});
+                b_abs_w0   = b_row_s0 + {9'd0, b_u_first_w};
+                b_wbase0   = {b_abs_w0[20:2], 2'b00};
+                b_align_w0 = b_row_s0 - b_wbase0;
+                b_words0   = b_s1_ulastw + b_align_w0 + 16'sd1;
+                b_align_px_cur <= b_align_w0 <<< 1;
+                l0b_wbase <= b_wbase0;
+                l0b_words <= b_words0[11:0];
+                l0b_go    <= 1'b1;
 
-                    if (bilin_en && (b_v_store0 != 12'd0)) begin
-                        b_row_s1   = src_b_base + ({9'd0, (b_v_store0 - 12'd1)} * {9'd0, b_wpl});
-                        b_abs_w1   = b_row_s1 + {9'd0, b_u_first_w};
-                        b_wbase1   = {b_abs_w1[20:2], 2'b00};
-                        b_align_w1 = b_row_s1 - b_wbase1;
-                        l1b_wbase <= b_wbase1;
-                        l1b_words <= (b_u_last_w + b_align_w1 + 16'sd1);
-                        l1b_go    <= 1'b1;
-                    end
+                if (b_s1_bilin && (b_s1_vstore != 12'd0)) begin
+                    b_row_s1   = b_row_s0 - {9'd0, b_wpl};
+                    b_abs_w1   = b_row_s1 + {9'd0, b_u_first_w};
+                    b_wbase1   = {b_abs_w1[20:2], 2'b00};
+                    b_align_w1 = b_row_s1 - b_wbase1;
+                    l1b_wbase <= b_wbase1;
+                    l1b_words <= (b_s1_ulastw + b_align_w1 + 16'sd1);
+                    l1b_go    <= 1'b1;
                 end
             end
         end
