@@ -204,16 +204,22 @@ module sdr_arb #(
         else if (push_evt)              occ <= occ + 22'd1;
         else if (App_wr_en)             occ <= (occ == 0) ? 22'd0 : (occ - 22'd1);
     end
-    wire [9:0]  fifo_rdusedw_eng = (occ >= 22'd512) ? 10'd511 : occ[9:0];
+    // ★★ 2026-10-25【P0-4】宽比较 → 位判断（语义完全等价，省掉 6 级 ADDER 比较链）：
+    //   occ >= 512 ⟺ occ[21:9] != 0；occ >= 248 (=8'hF8) ⟺ occ[21:8] != 0 或 occ[7:3] 全 1。
+    //   125 MHz 域唯一真违例（occ → o_occ_hi → u_wr/write_len_latch → App_rd_en）
+    //   就是被这两条 22 位比较加法链拖出来的；数值判据一个字没改。
+    wire        occ_hi_raw  = |occ[21:9];
+    wire        occ_pre_raw = (|occ[21:8]) | (&occ[7:3]);
+    wire [9:0]  fifo_rdusedw_eng = occ_hi_raw ? 10'd511 : occ[9:0];
     // ★ 诊断（见端口说明）：occ ≥ 512 = 引擎认为管道满、会开工。
     //   放在这里是因为 occ 在这一行上面才声明（ModelSim 不许先用后声明）。
-    assign o_occ_hi = (occ >= 22'd512);
+    assign o_occ_hi = occ_hi_raw;
     // ★★ 2026-10-04 实测修正：原设 240（提前 16 个字）在 25 MHz SD 下要等约 20 µs，
     //    再加突发 2 µs，一次让路接近一整行（26.4 µs）→ 每撞一次掉一行
     //    ⇒ 上板看到"白色横条纹往上扫"。
     //    提前量其实只要覆盖读请求的几拍流水：8 个字 ≈ 10 µs + 突发 2 µs ≈ 12 µs，
     //    而一行里取数 6.4 µs + 让路 12 µs 仍在 26.4 µs 之内 ⇒ 不会掉行。
-    assign o_occ_pre = (occ >= 22'd248);   // ★ 提前让路阈值：256 提前 8 个字
+    assign o_occ_pre = occ_pre_raw;        // ★ 提前让路阈值：256 提前 8 个字（等价 occ>=248）
 
     // ---- ★ 收尾补喂（padding）------------------------------------------
     //  A 推完 a_wr_len 个字之后，由本模块继续往 FIFO 里补喂 PAD_WORDS 个 dummy 字
