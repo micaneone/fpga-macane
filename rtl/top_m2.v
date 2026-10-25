@@ -1915,7 +1915,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     // ============================================================
 
-    localparam integer MENU_N = 5;                  // 菜单项数（★ 2026-10-25【加分辨率】：4→5，行 4 = 清晰 800/1024）★ menu_ovl 的 ROW_N 必须一样
+    localparam integer MENU_N = 6;                  // 菜单项数（★ 2026-10-25【加分辨率+字幕】：4→5→6，行 4 = 清晰 800/1024、行 5 = 字幕 开/关）★ menu_ovl 的 ROW_N 必须一样
 
     localparam integer MENU_W = 3;                  // 光标位宽（5 项 ⇒ 3 位）；改条数时这里也要改
 
@@ -2676,8 +2676,11 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
     // ★★★ 2026-10-25【菜单加分辨率行】：行 4 = 清晰 ⇒ KEY3 拨一下 = 登记「切到另一套位流」请求
     //     （不立即切：文件末尾 MBOOT 段会等轮播下一张图 adv_req_w 时才白闪 + 重配置）
     wire res_step = menu_edit & key3_step_press & (menu_sel == 3'd4);
+    // ★★★ 2026-10-25【菜单加字幕开关】：行 5 = 字幕 ⇒ KEY3 拨一下 = 字幕总开关翻转（立刻生效，不用等换图）
+    wire sub_step = menu_edit & key3_step_press & (menu_sel == 3'd5);
 
     reg  viz_on;                                                        // 1 = 显示 / 0 = 关闭
+    reg  sub_menu_on;                                                   // ★ 2026-10-25 行 5：字幕总开关（1 = 显示 / 0 = 关）
 
 
 
@@ -2688,6 +2691,8 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
             zoom_lv <= 3'd0;
 
             viz_on  <= 1'b1;                       // ★ 2026-10-24：可视化上电默认开（= 加开关之前的行为）
+
+            sub_menu_on <= 1'b1;                   // ★ 2026-10-25：字幕上电默认显示
 
         end
 
@@ -2704,6 +2709,12 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
         else if (viz_step) begin
 
             viz_on <= ~viz_on;                    // ★ 行 1 开关：每按一次 KEY3 翻转（只有两态，不分方向）
+
+        end
+
+        else if (sub_step) begin
+
+            sub_menu_on <= ~sub_menu_on;          // ★ 行 5 开关：字幕 开↔关（只有两态，不分方向）
 
         end
 
@@ -2968,7 +2979,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
         if (!disp_rst_n) begin sub_on_s1 <= 1'b0; sub_on_s2 <= 1'b0; end
 
-        else             begin sub_on_s1 <= sub_loaded; sub_on_s2 <= sub_on_s1; end
+        else             begin sub_on_s1 <= sub_loaded & sub_menu_on; sub_on_s2 <= sub_on_s1; end   // ★ 2026-10-25：菜单行 5 关字幕时整条字幕不叠
 
     end
 
@@ -4821,6 +4832,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
         // ★★★ 2026-10-25【菜单加分辨率行】：行 4「清晰」显示本镜像分辨率（0=800×600）
 
         .menu_res_1024(menu_res_1024),
+        .menu_sub_on(sub_menu_on),       // ★ 2026-10-25：行 5「字幕」数值（开/关）
 
         // ★★★ 2026-10-21【D2 · B1/B2 兜底页】：没卡 / 坏图 / 装载中 ⇒ 深底自检页（代替米白空屏）
 
