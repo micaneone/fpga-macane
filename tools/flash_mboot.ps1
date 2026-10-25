@@ -90,7 +90,7 @@ if ([string]::IsNullOrWhiteSpace($binPath)) { $binPath = Join-Path (Split-Path -
 if (-not [IO.Path]::IsPathRooted($binPath)) { $binPath = Join-Path (Get-Location) $binPath }
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $binPath) | Out-Null
 
-$tclCreate = 'set rc [catch {create_flash_file -target_file {__BIT_A__} -added_file "{__BIT_B__}:__ADDR_B__" -output {__BIN__} -rom_size __ROM__} ra]' + "`n" +
+$tclCreate = 'set rc [catch {create_flash_file -target_file {__BIT_A__} -added_file "__BIT_B__:__ADDR_B__" -output {__BIN__} -rom_size __ROM__} ra]' + "`n" +
              'puts "CREATE rc=$rc"' + "`n" + 'puts "CREATE result: $ra"' + "`n" +
              'if {![file exists {__BIN__}]} { puts "CREATE: output file missing"; exit }' + "`n" +
              'file stat {__BIN__} so' + "`n" + 'puts "BIN size: $so(size)"'
@@ -120,6 +120,10 @@ if (-not $SkipBuildBin) {
     $m = [regex]::Match($t, 'BIN size: (\d+)')
     if ($m.Success) { Write-Host ('    merged bin: ' + $binPath + '  ' + $m.Groups[1].Value + ' bytes') }
     if (-not (Test-Path -LiteralPath $binPath)) { throw ('merged bin not created: ' + $binPath) }
+    # sanity: a proper two-image merge is ~ (0x0A0000 + bit_size) > 1 MB; a single-image
+    # fallback (added file silently ignored) is only ~640 KB and would brick slot B.
+    $mergedLen = (Get-Item -LiteralPath $binPath).Length
+    if ($mergedLen -lt 1000000) { throw ('merged bin only ' + $mergedLen + ' bytes -- the added image was IGNORED (expected ~1296081); refusing to program') }
 }
 
 if ($DryRun) {
