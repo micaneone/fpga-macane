@@ -11,6 +11,7 @@ location (`Split-Path -Parent $PSScriptRoot`).
 |---|---|
 | `build.ps1` | Deletes `prj\M2_Runs`, runs TD syn->phy, and **proves** a fresh `M2.bit` exists (mtime newer than start). Archives the bit to `..\burn\<Tag>_<stamp>.bit`. Logs to `logs\`. |
 | `burn.ps1` | SRAM-downloads the bit (`download -bit`) and requires `PRG-2014 Chip validation success`. Archives a copy. `-ReadSeconds N -Port COM6` also decodes the serial frame afterwards. |
+| `flash.ps1` | **Persistent** upgrade: writes the bit into the on-board SPI FLASH (`program_spi` + `verify_spi`) so the board boots it stand-alone after a power cycle. Requires `bw_commands_prompt.exe` (not `td_...`). `-Bit <file> -Tag <label>`, `-NoVerify`, `-DryRun`. ~2 min. |
 | `check_filelist.ps1` | Cross-checks `prj\M2.al` against disk: missing files, duplicates, unlisted-but-referenced modules (build breakers), unlisted-and-unused files (dead code). |
 
 ## Typical loop
@@ -24,6 +25,14 @@ powershell -ExecutionPolicy Bypass -File .\tools\burn.ps1 -Tag D5_try1 -Port COM
 
 # 3. sanity: is the RTL file list still consistent?
 powershell -ExecutionPolicy Bypass -File .\tools\check_filelist.ps1
+```
+
+Before an exhibition / when the board must boot stand-alone, add a FLASH step
+after step 2 (SRAM download is lost on power cycle, FLASH is not):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\flash.ps1 -Tag D5_try1 -Bit ..\burn\D5_try1_<stamp>.bit
+# then power-cycle once and confirm the serial frame comes back
 ```
 
 ## Why `M2_Runs` must be deleted
