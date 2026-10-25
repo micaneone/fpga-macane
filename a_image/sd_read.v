@@ -27,13 +27,8 @@
       //   仿真里是对的（sim\tb_sd_stream.v，1.32x、逐字节一致、发了 CMD12），
       //   但上板表现是"图装进去了、之后音频/字幕全读不到"（卡停在多块模式里不认新命令）。
       //   ⇒ `top_a.v` 里 `stream_en` 现在**恒接 1'b0**，这条路是死代码。
-      // ★★★ 2026-10-25【收流 v2：找到更可信的根因，重新试】：
-      //   v1 的失败多半不是"卡不支持 CMD18"，而是**收尾时 CS 撤得太早**：
-      //   S_STRM 冻结 SCLK 时卡其实已经在发下一块数据，CMD12 发出去时 MISO 上回的
-      //   是数据/令牌而不是 R1；v1 只收 2 字节就撤 CS ⇒ 卡在数据中途被 CS 拉高。
-      //   v2 改成：发完 CMD12 继续给时钟，遇到 token 就把那**一整块收完丢掉**，
-      //   等到 R1 后再给 8 个 Ncc 时钟才撤 CS（见 S_STRME 里的状态说明）。
-      //   上板验证：图装完后音频/字幕还能不能读 —— 能读才说明卡真退出了多块模式。
+      //   要重新试：① 先确认卡支持 CMD18；② 补上"CMD12 之后等 busy 释放"的判据；
+      //   ③ 一次只改这一个开关，别再同时动 SCLK 频率。
       input           stream_en
   );
       parameter sck_div = 0;
@@ -60,8 +55,6 @@
       //  ★ 100 MHz 下 2000 拍 = 20 µs（`sd_read_cdc` 就是把本模块搬到快速域跑的）。
       localparam [15:0] STRM_TO = 16'd2000;
       localparam [2:0]  STRME_N = 3'd4;   // 收尾打几个空字节
-      // ★ 2026-10-25【收流 v2】：等"数据 token / R1"的超时（= TIME_OUT 同量级，40 ms）
-      localparam [21:0] STP_TO_MAX = 22'd2_000_000;
 
       reg         spi_start;
       reg         spi_end;
@@ -83,11 +76,6 @@
       reg  [15:0] strm_to;                  // 等"下一块请求"的计时
       reg  [2:0]  strme_cnt;                // 收尾阶段的字节计数
       reg  [3:0]  c12_rcv;                  // CMD12 阶段已收发几个字节
-      // ★★★ 2026-10-25【收流 v2】：CMD12 之后要"把当前那一块收完再撤 CS"
-      //   见 S_STRME 里的注释。stp_cnt 数"一块剩下的字节"（512 数据 + 2 CRC），
-      //   stp_to 是等 token/R1 的超时（防止卡不响应时一直挂着）。
-      reg  [9:0]  stp_cnt;
-      reg  [21:0] stp_to;
       // 流式等待中冻结 SCLK（CS 仍举着）；其余状态一律放行
       wire        spi_clk_en = (flag_r != S_STRM);
 
@@ -165,9 +153,6 @@
               // ★ 2026-10-17 流式状态也要复位（否则流水号未定义）
               strm_to   <= 16'd0;
               strme_cnt <= 3'd0;
-              // ★ 2026-10-25 收流 v2 的计数也要复位
-              stp_cnt   <= 10'd0;
-              stp_to    <= 22'd0;
           end
           else if (flag_r == S_IDLE) begin
               if (start_read) begin
@@ -285,9 +270,6 @@
                   strme_cnt <= 3'd0;
                   c12_rcv   <= 4'd0;
                   strm_to   <= 16'd0;
-                  // ★ 2026-10-25 收流 v2：进收尾就清 drain/超时计数
-                  stp_cnt   <= 10'd0;
-                  stp_to    <= 22'd0;
                   flag_r    <= S_STRME;
               end
               else
@@ -295,81 +277,23 @@
           end
           else if (flag_r == S_STRME) begin
               // ============================================================
-              //  ★ 2026-10-17【收流 = 发 CMD12 再撤 CS】 + ★ 2026-10-25 修正
-              //
-              //  历史：v1 只"发 6 字节 CMD12 + 收 2 字节 + 撤 CS"，上板失败
-              //        （图能装完，但之后音频/字幕全读不到 = 卡赖在多块模式里）。
-              //
-              //  ★ 2026-10-25【v2 根因与修法】：卡在 SPI 多块读时**一直在连续发块**
-              //  （我们的 S_STRM 是在上一块 CRC 之后冻结 SCLK，卡其实已经准备好接着发
-              //    下一块）。所以：
-              //      · CMD12 发出去的同时，MISO 上回来的多半是**数据/令牌**，不是 R1；
-              //      · v1 把那两个字节当响应收掉就撤 CS ⇒ 卡正在发数据中途被 CS 拉高，
-              //        内部"停流"状态没走完，后面所有命令都不认。
-              //    正确顺序（按 SPI 模式 SD 规范）：
-              //      ① 发 6 字节 CMD12（卡会**等当前这一块发完**才响应）；
-              //      ② 继续给时钟：遇到数据 token 0xFE ⇒ 把这一整块（512 数据 + 2 CRC）
-              //         收完丢掉；块边界上收到 R1（0x00）⇒ 记下"已经收到响应"；
-              //      ③ R1 之后再给 8 个时钟（Ncc），才允许撤 CS。
-              //    ⇒ c12_rcv 兼作相位号：0..5=命令 6=等 token/R1 7=丢整块
-              //       8=收 R1 9=Ncc（再收 1 字节就 spi_end）
+              //  ★ 2026-10-17【收流 = 发 CMD12 再撤 CS】
+              //    上板教训：只把在途字节吃掉就撤 CS，真卡不会退出多块读 ——
+              //    图像那一趟能读完（因为跑到底了），但**随后的音频/字幕装载全失败**
+              //    （遥测：图写了 153600 字、`fail=1`、px 被清 0）。
+              //    SPI 规范：多块读要用 CMD12(STOP_TRANSMISSION) 收尾。
+              //    序列：发 6 字节命令 → 收 2 字节（stuff + R1，值不管）→ 撤 CS。
               // ============================================================
               spi_start <= 1'b0;
               if (c12_rcv < 4'd6) begin
-                  // ① 命令字节（read_tx_data 那一块负责发 CMD12 + 4 个 0 + 0xFF）
                   if (receive_done) c12_rcv <= c12_rcv + 4'd1;
               end
-              else if (c12_rcv == 4'd6) begin
-                  // ② 卡还可能在发下一块：先等 token（然后整块收掉）或直接等 R1
-                  if (receive_done) begin
-                      if (read_rx_data == 8'hFE) begin
-                          // 拿到了新块的 token ⇒ 把这一块收完丢掉
-                          c12_rcv <= 4'd7;
-                          stp_cnt <= 10'd0;
-                      end
-                      else if (read_rx_data == 8'h00) begin
-                          // 空档里直接就是 R1（卡当前没有在发块）
-                          c12_rcv <= 4'd9;   // 已收到 R1，直接进 Ncc
-                          stp_to  <= 22'd0;
-                      end
-                      else if ((read_rx_data != 8'hFF) && (read_rx_data[7] == 1'b0)) begin
-                          // 其它不带忙标志的 R1 变体（错误位≠0）也当响应收到，别死等
-                          c12_rcv <= 4'd9;
-                          stp_to  <= 22'd0;
-                      end
-                      else if (stp_to >= STP_TO_MAX) begin
-                          c12_rcv <= 4'd8;   // 超时兜底：按"已收到 R1"处理，尽量收尾
-                          stp_to  <= 22'd0;
-                      end
-                      else stp_to <= stp_to + 1'b1;
-                  end
-                  else if (stp_to != STP_TO_MAX) stp_to <= stp_to + 1'b1;
-              end
-              else if (c12_rcv == 4'd7) begin
-                  // ②' 丢一整块：token 之后 512 数据 + 2 CRC
-                  if (receive_done) begin
-                      if (stp_cnt == 10'd513) begin
-                          c12_rcv <= 4'd8;     // 块结束，下一字节应是 R1
-                          stp_to  <= 22'd0;
-                      end
-                      else stp_cnt <= stp_cnt + 1'b1;
-                  end
-                  else if (stp_to != STP_TO_MAX) stp_to <= stp_to + 1'b1;
-              end
-              else if (c12_rcv == 4'd8) begin
-                  // ③ 收 R1（值不再检查：前面已经"丢块"或本就在空档）
-                  if (receive_done) begin
-                      c12_rcv <= 4'd9;
-                      stp_to  <= 22'd0;
-                  end
-                  else if (stp_to != STP_TO_MAX) stp_to <= stp_to + 1'b1;
+              else if (c12_rcv < 4'd8) begin
+                  if (receive_done) c12_rcv <= c12_rcv + 4'd1;
               end
               else begin
-                  // ④ Ncc：R1 之后 8 个时钟，然后才撤 CS
-                  if (receive_done) begin
-                      spi_end <= 1'b1;
-                      flag_r  <= S_STOP;
-                  end
+                  spi_end <= 1'b1;
+                  flag_r  <= S_STOP;
               end
           end
           else begin
