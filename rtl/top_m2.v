@@ -6093,9 +6093,13 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
                     else begin
 
-                        aud_fail <= 1'b1;
+                        aud_fail     <= 1'b1;
 
-                        aud_st   <= 2'd3;
+                        aud_loaded   <= 1'b0;      // ★ 2026-10-25【缺配套不沿用】没有这首 ⇒ 静音，不让上一首继续响
+
+                        aud_stop_req <= 1'b1;      // ★ 先停播（flush + fade），别沿用上一首
+
+                        aud_st       <= 2'd3;
 
                     end
 
@@ -6323,9 +6327,17 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
                 end
 
-                // ★ 2026-10-23：a_fail 是三条链合并的**电平**，上一次失败会一直举着，不能在这里早判死
-                //   （实测一半字幕装载被误判失败 ⇒ 字幕不换）。只认 a_sub_done + 超时兜底。
-                // else if (a_fail) begin sub_fail <= 1'b1; sub_st <= 2'd3; end
+                // ★ 2026-10-23：a_fail 是三条链合并的**电平**，上一次失败会一直举着，不能拿电平早判死
+                //   （实测一半字幕装载被误判失败 ⇒ 字幕不换）。电平判据已注释，改成**上升沿**。
+                // ★ 2026-10-25【缺配套不沿用】这一趟 A 确实报错（卡上没有第 k 条字幕）⇒ 立刻撤字幕，
+                //   别让上一张的字幕挂在新图上；等下一次 a_sub_done 再重新打开。
+                else if (a_fail_rise) begin
+                    sub_wait   <= 26'd0;
+                    sub_retry  <= 2'd0;
+                    sub_fail   <= 1'b1;
+                    sub_loaded <= 1'b0;
+                    sub_st     <= 2'd3;
+                end
 
                 // ★ 另一个兜底：A 已经闲下来了却迟迟没有 sub_done ⇒ 那条链没跑起来
 
@@ -6343,6 +6355,8 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
                         end
                         else begin
                             sub_fail  <= 1'b1;
+                            // ★ 2026-10-25【缺配套不沿用】重试也装不上 ⇒ 撤掉旧字幕（屏上留空，不挂上一张的）
+                            sub_loaded <= 1'b0;
                             sub_st    <= 2'd3;
                         end
                     end
