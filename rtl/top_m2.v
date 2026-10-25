@@ -2121,7 +2121,8 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     //  ★ 报警期间只做两件事，不动装载、不动 SDRAM：
 
-    //    ① `alert_on` 送给 disp_top ⇒ alert_ovl 叠"红框 + 1 Hz 红闪"
+    //    ① `alert_on` 送给 disp_top ⇒ alert_ovl 叠"1 Hz 闪的红边框"（2026-10-25 起
+    //       只闪边框、不再整屏红罩：现场要求紧急时图也要看得清）
 
     //    ② 压低 `adv_req_w`（轮播请求）⇒ 报警时**不换图**，
 
