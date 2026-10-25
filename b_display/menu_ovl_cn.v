@@ -41,7 +41,7 @@
 module menu_ovl_cn #(
     parameter integer SCR_W   = 1024,
     parameter integer SCR_H   = 768,
-    parameter integer ROW_N   = 4,      // ★ 必须和 top_m2 的 MENU_N 一致
+    parameter integer ROW_N   = 5,      // ★ 必须和 top_m2 的 MENU_N 一致（2026-10-25 加第 5 行「清晰」）
     parameter integer CELL_X0 = 12,     // 第一个小格左上角（屏幕坐标）
     parameter integer CELL_Y0 = 12,
     parameter integer CELL_W  = 184,    // 小格宽（7 个字形列 + 左右各 8 px 内边距）
@@ -73,6 +73,7 @@ module menu_ovl_cn #(
     input  wire        menu_on,
     input  wire [2:0]  menu_sel,      // 选中行 0..3
     input  wire        menu_edit,     // ★ 2026-10-24：KEY2 确认（调节态）=1 ⇒ 选中格描边变红
+    input  wire        menu_res_1024, // ★ 2026-10-25：本镜像分辨率 1=1024x768 / 0=800x600（行 4 显示用）
     // ---------------- 要显示的"活值"（只读，绝不写回）----------------
     input  wire [2:0]  zoom_lv,       // 0..5
     input  wire [1:0]  sel_aud,       // （2026-10-24 起不再显示：行 1 换成可视化开关；端口保留，disp_top 铺线不动）
@@ -109,6 +110,9 @@ module menu_ovl_cn #(
     localparam [4:0] CH_S     = 5'd19;   // '视'
     localparam [4:0] CH_ON    = 5'd20;   // '开'
     localparam [4:0] CH_OFF   = 5'd21;   // '关'
+    // ★ 2026-10-25【菜单第 5 行：清晰（分辨率）】：字形表里新加的两个汉字
+    localparam [4:0] CH_QING  = 5'd22;   // '清'
+    localparam [4:0] CH_XI    = 5'd23;   // '晰'
 
     // ============================================================
     //  1. 第①级：几何 / 选格 / 字符表，全部在输入侧算完并打拍
@@ -119,7 +123,8 @@ module menu_ovl_cn #(
     wire in_x = (x_in >= CELL_X0) && (x_in < CELL_X1);
     wire in_y = (yl < TOTAL_H);                       // y_in < CELL_Y0 时 yl 回绕成大数 ⇒ 自动排除
 
-    wire [2:0] row_now = (yl >= PITCH * 3) ? 3'd3 :
+    wire [2:0] row_now = (yl >= PITCH * 4) ? 3'd4 :
+                         (yl >= PITCH * 3) ? 3'd3 :
                          (yl >= PITCH * 2) ? 3'd2 :
                          (yl >= PITCH * 1) ? 3'd1 : 3'd0;
 
@@ -129,6 +134,7 @@ module menu_ovl_cn #(
             3'd1:    row_top = CELL_Y0[11:0] + PITCH;
             3'd2:    row_top = CELL_Y0[11:0] + PITCH * 2;
             3'd3:    row_top = CELL_Y0[11:0] + PITCH * 3;
+            3'd4:    row_top = CELL_Y0[11:0] + PITCH * 4;
             default: row_top = CELL_Y0[11:0];
         endcase
     end
@@ -178,19 +184,34 @@ module menu_ovl_cn #(
             3'd0: begin lab0 = 5'd10; lab1 = 5'd11; end   // 缩 放
             3'd1: begin lab0 = CH_K;  lab1 = CH_S;  end   // 可 视
             3'd2: begin lab0 = 5'd12; lab1 = 5'd14; end   // 音 量
-            default: begin lab0 = 5'd15; lab1 = 5'd16; end// 亮 度
+            3'd3: begin lab0 = 5'd15; lab1 = 5'd16; end   // 亮 度
+            3'd4: begin lab0 = CH_QING; lab1 = CH_XI; end // 清 晰（分辨率）
+            default: begin lab0 = CH_BLANK; lab1 = CH_BLANK; end
         endcase
     end
 
-    // 数值：缩放 = 数字（0..5）；可视 = 开 / 关；音量/亮度 = 百分比（0% / 50% / 100%）
+    // 数值：缩放 = 数字（0..5）；可视 = 开 / 关；音量/亮度 = 百分比（0% / 50% / 100%）；
+    //       清晰 = 当前镜像分辨率 800 / 1024（右对齐，最多 4 个字形）
     reg [4:0] v_c3, v_c4, v_c5, v_c6;
     reg [4:0] lv10;
     always @(*) begin
         v_c3 = CH_BLANK; v_c4 = CH_BLANK; v_c5 = CH_BLANK; v_c6 = CH_BLANK;
-        lv10 = 5'd0;                                   // 行 0/1 不用；给默认值免推 latch
+        lv10 = 5'd0;                                   // 行 0/1/4 不用；给默认值免推 latch
         case (row_now)
             3'd0: v_c6 = CH_0 + {2'b00, zoom_lv};              // 0..5 适配/1x/1.5x/2x/3x/4x
             3'd1: v_c6 = viz_on ? CH_ON : CH_OFF;              // 开 / 关
+            3'd4: begin                                        // 清晰：800 / 1024
+                if (menu_res_1024) begin
+                    v_c3 = CH_0 + 5'd1;                        // "1024"
+                    v_c4 = CH_0;
+                    v_c5 = CH_0 + 5'd2;
+                    v_c6 = CH_0 + 5'd4;
+                end else begin
+                    v_c4 = CH_0 + 5'd8;                        // "800"
+                    v_c5 = CH_0;
+                    v_c6 = CH_0;
+                end
+            end
             default: begin
                 lv10 = (row_now == 3'd2) ? {1'b0, vol_lv} : {1'b0, bri_lv};   // 0..10
                 v_c6 = CH_PCT;

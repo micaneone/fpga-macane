@@ -1897,7 +1897,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     // ============================================================
 
-    localparam integer MENU_N = 4;                  // 菜单项数（★ 2026-10-20【D1·A2】：5→4，删掉行 4 VISUAL）★ menu_ovl 的 ROW_N 必须一样
+    localparam integer MENU_N = 5;                  // 菜单项数（★ 2026-10-25【加分辨率】：4→5，行 4 = 清晰 800/1024）★ menu_ovl 的 ROW_N 必须一样
 
     localparam integer MENU_W = 3;                  // 光标位宽（5 项 ⇒ 3 位）；改条数时这里也要改
 
@@ -2650,6 +2650,9 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
     //   · 后台 viz_time 照样跑（它只旁听音频），重新打开立刻有图。
 
     wire viz_step = menu_edit & key3_step_press & (menu_sel == 3'd1);  // ★ 行 1：ON↔OFF 翻转（不看方向）
+    // ★★★ 2026-10-25【菜单加分辨率行】：行 4 = 清晰 ⇒ KEY3 拨一下 = 登记「切到另一套位流」请求
+    //     （不立即切：文件末尾 MBOOT 段会等轮播下一张图 adv_req_w 时才白闪 + 重配置）
+    wire res_step = menu_edit & key3_step_press & (menu_sel == 3'd4);
 
     reg  viz_on;                                                        // 1 = 显示 / 0 = 关闭
 
@@ -4690,6 +4693,10 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
 
 
+    // ★★★ 2026-10-25【菜单加分辨率行】本镜像分辨率：1 = 1024×768（主树，RES_JUMP_ADDR=0x00）
+    //     build800 worktree 里改成 1'b0（那边 RES_JUMP_ADDR=0x0A）。
+    wire menu_res_1024 = 1'b1;
+
     // ★★★ 2026-10-25【不黑屏 · 切换白闪】整屏白门控（产生逻辑在文件末尾 MBOOT 段）
     wire wb_white;
 
@@ -4776,6 +4783,12 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
         //   （disp_top 里用 `~menu_viz_on` 把柱形 mask 和压暗 band 一起门掉）
 
         .menu_viz_on(viz_s2),
+
+        // ★★★ 2026-10-25【菜单加分辨率行】：行 4「清晰」显示本镜像分辨率（1=1024×768 / 0=800×600）
+
+        //   本树（主树）是 1024×768 镜像 ⇒ 恒 1；build800 worktree 里改成 1'b0。
+
+        .menu_res_1024(menu_res_1024),
 
         // ★★★ 2026-10-21【D2 · B1/B2 兜底页】：没卡 / 坏图 / 装载中 ⇒ 深底自检页（代替米白空屏）
 
@@ -7284,8 +7297,8 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
             if (wb_boot_cnt < WB_BOOT_TICKS)
                 wb_boot_cnt <= wb_boot_cnt + 1'b1;
 
-            // ① SW3 只登记，这一张图**不动**
-            if (sw3_change)
+            // ① SW3 或菜单行 4（清晰）→ 只登记，这一张图**不动**
+            if (sw3_change || res_step)
                 res_switch_pend <= 1'b1;
 
             // ② 「下一张图」的请求来了 → 先白闪，不马上切
