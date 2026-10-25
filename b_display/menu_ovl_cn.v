@@ -9,6 +9,14 @@
 //        竖排在屏幕左上角；选中行用亮蓝色更粗的描边（3px），未选中行 1px 暗灰描边。
 //      面板外一个像素都不许改（`menu_on=0` ⇒ 所有 draw_* 为 0 ⇒ `px_out == px_in`）。
 //
+//  ★ 2026-10-25【P0-1c 时序：几何/查表两级流水，总延迟仍是 2 拍】
+//      上一版结构是"输入打一拍（x_p/y_p）→ 一坨组合算完 → 输出打一拍"，
+//      中间那一坨（y 比较→行号→标签/数值查表→字形列选择）全压在一个 40 MHz 周期里，
+//      在 P0-1/P0-1b 之后它成了像素域新的最差路径（25.211 ns / 20 级，超 0.491 ns）。
+//      ⇒ 现在把这一坨**整体提前到输入侧**：直接吃 x_in/y_in 算完立刻打拍（第①级），
+//        第②级只剩"字模查表 + 调色输出"。总延迟**仍是 2 拍**，和上一版逐像素对齐，
+//        所以 `sim/tb_menu_cn.v` 的判据/坐标窗口不用改。
+//
 //  版面（全部是文件头常量，改位置只动这几个数）
 //      小格 184x40，左上角起点 (12,12)，格间隙 6 ⇒ 行距 PITCH = 46
 //      4 格纵向：y = 12 / 58 / 104 / 150（右下角 196,190）
@@ -103,27 +111,13 @@ module menu_ovl_cn #(
     localparam [4:0] CH_OFF   = 5'd21;   // '关'
 
     // ============================================================
-    //  1. 打一拍：坐标跟着数据一起走
+    //  1. 第①级：几何 / 选格 / 字符表，全部在输入侧算完并打拍
     // ============================================================
-    reg        de_p, vs_p;
-    reg [11:0] x_p, y_p;
-    reg [15:0] px_p;
-
-    always @(posedge clk_pix) begin
-        de_p <= de_in;
-        vs_p <= vs_in;
-        x_p  <= x_in;
-        y_p  <= y_in;
-        px_p <= px_in;
-    end
-
-    // ============================================================
-    //  2. 几何：落在第几格 / 格内坐标
-    // ============================================================
-    wire [11:0] yl = y_p - CELL_Y0[11:0];             // 相对第一格顶部
-
-    wire in_x = (x_p >= CELL_X0) && (x_p < CELL_X1);
-    wire in_y = (yl < TOTAL_H);                        // y_p < CELL_Y0 时 yl 回绕成大数 ⇒ 自动排除
+    //  （直接吃 x_in / y_in，不先打 x_p/y_p —— 这样中间那一大坨组合有整整一拍可用，
+    //    第②级只剩字模查表和调色。总延迟 = 2 拍，和改版之前一致。）
+    wire [11:0] yl = y_in - CELL_Y0[11:0];            // 相对第一格顶部
+    wire in_x = (x_in >= CELL_X0) && (x_in < CELL_X1);
+    wire in_y = (yl < TOTAL_H);                       // y_in < CELL_Y0 时 yl 回绕成大数 ⇒ 自动排除
 
     wire [2:0] row_now = (yl >= PITCH * 3) ? 3'd3 :
                          (yl >= PITCH * 2) ? 3'd2 :
@@ -139,29 +133,23 @@ module menu_ovl_cn #(
         endcase
     end
 
-    wire [11:0] yy      = y_p - row_top;               // 格内纵向坐标（0..CELL_H-1）
+    wire [11:0] yy      = y_in - row_top;             // 格内纵向坐标（0..CELL_H-1）
     wire        in_row  = (yy < CELL_H);
     wire        in_cell = in_x && in_y && in_row;
 
     // ---- 描边：选中格 3px 亮蓝；未选中格 1px 中灰（没有底色，格内一律直通）----
-    wire b_sel  = (x_p <  (CELL_X0 + SEL_T)) || (x_p >= (CELL_X1 - SEL_T)) ||
+    wire b_sel  = (x_in < (CELL_X0 + SEL_T)) || (x_in >= (CELL_X1 - SEL_T)) ||
                   (yy  <  SEL_T[11:0])       || (yy  >= (CELL_H - SEL_T));
-    wire b_norm = (x_p <  (CELL_X0 + FRAME_T)) || (x_p >= (CELL_X1 - FRAME_T)) ||
-                  (yy  <  FRAME_T[11:0])       || (yy  >= (CELL_H - FRAME_T));
+    wire b_norm = (x_in < (CELL_X0 + FRAME_T)) || (x_in >= (CELL_X1 - FRAME_T)) ||
+                  (yy  <  FRAME_T[11:0])     || (yy  >= (CELL_H - FRAME_T));
 
-    wire is_sel   = (row_now == menu_sel);
-    wire draw_sel = menu_on && in_cell &&  is_sel && b_sel;
-    wire draw_frm = menu_on && in_cell && !is_sel && b_norm;
-
-    // ---- 半透明底：格内画面压到 50% 亮度（≈ 和黑色 50% 混合，RGB565 无 alpha 的近似做法）----
-    wire        draw_fill = menu_on && in_cell;
-    wire [15:0] px_dim    = (px_p >> 1) & 16'h7BEF;
+    wire is_sel = (row_now == menu_sel);
 
     // ---- 文字格：横向 [TXT_X0, TXT_X0+168)，纵向 [row_top+TOP_OFF, +24) ----
-    wire [11:0] rx = x_p - TXT_X0[11:0];
-    wire [11:0] ry = yy  - TOP_OFF[11:0];
+    wire [11:0] rx = x_in - TXT_X0[11:0];
+    wire [11:0] ry = yy   - TOP_OFF[11:0];
 
-    wire in_gly_x = in_cell && (x_p >= TXT_X0) && (rx < GW);
+    wire in_gly_x = in_cell && (x_in >= TXT_X0) && (rx < GW);
     wire in_gly_y = (ry < CELL);
     wire in_gly   = in_gly_x && in_gly_y;
 
@@ -183,9 +171,7 @@ module menu_ovl_cn #(
     // 字形 ROM 行序是"自下而上"（row=0 在屏幕最下面）
     wire [4:0] gy = 5'd23 - ry[4:0];
 
-    // ============================================================
-    //  3. 内容表：列 0/1 = 标签（汉字），列 2 = 空白，列 3..6 = 数值（右对齐）
-    // ============================================================
+    // ---- 内容表：列 0/1 = 标签（汉字），列 2 = 空白，列 3..6 = 数值（右对齐）----
     reg [4:0] lab0, lab1;
     always @(*) begin
         case (row_now)
@@ -226,21 +212,40 @@ module menu_ovl_cn #(
                       (gx == 3'd4) ? v_c4 :
                       (gx == 3'd5) ? v_c5 : v_c6;
 
+    // ---- 半透明底：格内画面压到 50% 亮度（≈ 和黑色 50% 混合，RGB565 无 alpha 的近似做法）----
+    wire [15:0] px_dim = (px_in >> 1) & 16'h7BEF;
+
+    // ---- 第①级打拍：几何/选中/字符 全部进寄存器 ----
+    reg        q_de, q_vs, q_fill, q_sel, q_frm, q_gly;
+    reg [4:0]  q_ch, q_gy, q_lx;
+    reg [15:0] q_px, q_dim;
+
+    always @(posedge clk_pix) begin
+        q_de   <= de_in;
+        q_vs   <= vs_in;
+        q_fill <= menu_on && in_cell;
+        q_sel  <= menu_on && in_cell &&  is_sel && b_sel;
+        q_frm  <= menu_on && in_cell && !is_sel && b_norm;
+        q_gly  <= menu_on && in_gly;
+        q_ch   <= g_ch;
+        q_gy   <= gy;
+        q_lx   <= lx;
+        q_px   <= px_in;
+        q_dim  <= px_dim;
+    end
+
     // ============================================================
-    //  4. 字形 ROM
+    //  2. 第②级：字模查表（组合 ROM）+ 调色输出
     // ============================================================
     wire font_px;
     font_cn u_font (
-        .ch  (g_ch),
-        .row (gy),
-        .col (lx),
+        .ch  (q_ch),
+        .row (q_gy),
+        .col (q_lx),
         .px  (font_px)
     );
 
-    // ============================================================
-    //  5. 合成（优先级见文件头；无底色，其余像素直通）
-    // ============================================================
-    wire draw_text = menu_on && in_gly && font_px;
+    wire draw_text = q_gly && font_px;
 
     always @(posedge clk_pix) begin
         if (!rst_pix_n) begin
@@ -248,13 +253,13 @@ module menu_ovl_cn #(
             de_out <= 1'b0;
             vs_out <= 1'b0;
         end else begin
-            de_out <= de_p;
-            vs_out <= vs_p;
+            de_out <= q_de;
+            vs_out <= q_vs;
             if (draw_text)      px_out <= CLR_INK;
-            else if (draw_sel)  px_out <= menu_edit ? CLR_RED : CLR_SEL;   // 确认后（调节态）外框变红
-            else if (draw_frm)  px_out <= CLR_FRAME;
-            else if (draw_fill) px_out <= px_dim;      // 半透明底（画面压暗 50%）
-            else                px_out <= px_p;
+            else if (q_sel)     px_out <= menu_edit ? CLR_RED : CLR_SEL;   // 确认后（调节态）外框变红
+            else if (q_frm)     px_out <= CLR_FRAME;
+            else if (q_fill)    px_out <= q_dim;      // 半透明底（画面压暗 50%）
+            else                px_out <= q_px;
         end
     end
 
