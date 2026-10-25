@@ -4690,6 +4690,9 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
 
 
+    // ★★★ 2026-10-25【不黑屏 · 切换白闪】整屏白门控（产生逻辑在文件末尾 MBOOT 段）
+    wire wb_white;
+
     disp_top u_disp (
 
         .clk_pix(clk_pix), .clk_par(clk_par), .clk_ser(clk_ser),
@@ -4862,6 +4865,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
         ,.o_off_first(lb_off), .o_align_bad(lb_alignbad)
     ,.frame_start_o(frame_start_pix)
+    ,.wb_white(wb_white)          // ★★★ 2026-10-25【不黑屏】整屏白门控（开机首图前 / 切换白闪）
 
     );
 
@@ -7254,20 +7258,56 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
     reg res_switch_pend;   // SW3 已拨过：等「下一张图」再切
     reg mboot_reboot_n;    // EG_LOGIC_MBOOT 的 rebootn（低有效 = 从 FLASH 另一地址重载）
 
+    // ---- ★★★ 2026-10-25【不黑屏】白闪：重配置黑屏用「白闪 + 新图」代替 ----
+    //  原来：下一张图请求 → 立刻重配置 → 电视黑屏 0.2~0.4 s → 新分辨率首图（还要 1.5 s）→ 很突兀。
+    //  现在：①开机（含重配置后的新镜像）先整屏白 ~1.6 s，盖住 SD 装首图那段；
+    //        ②切换时先把当前画面整屏白闪 50 ms，再拉低 rebootn 重配置；
+    //        ③新镜像启动又是白屏 → 装好首图直接出画面。
+    //  观感 =「白闪一下 → 新图」，黑屏被白闪吃掉了。
+    reg        wb_switch_white;      // 切换白闪中
+    reg [22:0] wb_dly;               // 白闪计时
+    reg [26:0] wb_boot_cnt;          // 开机计数（白屏时长）
+    localparam [26:0] WB_BOOT_TICKS = 27'd80_000_000;  // 1.6 s @ 50 MHz
+    localparam [22:0] WB_DLY_TICKS  = 23'd2_500_000;   // 50 ms @ 50 MHz
+    wire wb_boot_white = (wb_boot_cnt < WB_BOOT_TICKS);
+
     always @(posedge clk or negedge sys_rst_n) begin
         if (!sys_rst_n) begin
             res_switch_pend <= 1'b0;
             mboot_reboot_n  <= 1'b1;
+            wb_switch_white <= 1'b0;
+            wb_dly          <= 23'd0;
+            wb_boot_cnt     <= 27'd0;
         end
         else begin
+            // 开机白屏计时
+            if (wb_boot_cnt < WB_BOOT_TICKS)
+                wb_boot_cnt <= wb_boot_cnt + 1'b1;
+
+            // ① SW3 只登记，这一张图**不动**
             if (sw3_change)
-                res_switch_pend <= 1'b1;                    // 只登记，这一张图**不动**
-            else if (res_switch_pend && adv_req_w) begin    // 「下一张图」的请求来了 → 此刻才切
+                res_switch_pend <= 1'b1;
+
+            // ② 「下一张图」的请求来了 → 先白闪，不马上切
+            if (res_switch_pend && adv_req_w && !wb_switch_white) begin
                 res_switch_pend <= 1'b0;
-                mboot_reboot_n  <= 1'b0;                    // 拉低 = 重新配置
+                wb_switch_white <= 1'b1;
+                wb_dly          <= 23'd0;
+            end
+
+            // ③ 白闪满 50 ms → 才拉低 rebootn 重配置（此刻屏幕已经是白的）
+            if (wb_switch_white) begin
+                if (wb_dly >= WB_DLY_TICKS) begin
+                    wb_switch_white <= 1'b0;
+                    mboot_reboot_n  <= 1'b0;
+                end
+                else
+                    wb_dly <= wb_dly + 1'b1;
             end
         end
     end
+
+    assign wb_white = wb_boot_white | wb_switch_white;
 
     EG_LOGIC_MBOOT #(
         .ADDR_SOURCE_SEL ("DYNAMIC"),

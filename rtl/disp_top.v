@@ -226,7 +226,12 @@ module disp_top #(
     output wire [15:0] o_abort_cnt,
     output wire [15:0] o_off_first,
     output wire [15:0] o_align_bad,
-    output wire        frame_start_o     // ★ 2026-10-23：帧首单拍（clk_pix 域）
+    output wire        frame_start_o,    // ★ 2026-10-23：帧首单拍（clk_pix 域）
+    // ★★★ 2026-10-25【不黑屏 · 切换白闪】1 = 整屏强制白：
+    //   ① 开机首张图装好之前（约 1.6 s，代替原来的黑屏/兜底页过渡）；
+    //   ② 拨 SW3 切分辨率、等下一张图请求来时，先白闪 50 ms 再重配置位流。
+    //   只改 RGB 数据、不动 de/vs ⇒ HDMI 时序完全不变。
+    input  wire        wb_white
 );
 
     // ============================================================
@@ -630,6 +635,9 @@ module disp_top #(
         px_m[4:0],   px_m[4:2]
     };
 
+    // ★★★ 2026-10-25【不黑屏】整屏白：给 HDMI 的是「白 or 原图」二选一（de/vs 照旧）
+    wire [23:0] rgb_hdmi = wb_white ? 24'hFFFFFF : rgb888;
+
     // ============================================================
     //  HDMI（成品核，别动）
     // ============================================================
@@ -642,7 +650,7 @@ module disp_top #(
         .I_rst       (~rst_pix_n),
         .I_vs        (vs_m),           // ★ 改用菜单那一级之后的（和 rgb888 同拍）
         .I_de        (de_m),
-        .I_rgb       (rgb888),
+        .I_rgb       (rgb_hdmi),
         .O_tmds_clk_p(HDMI_CLK_P),
         .O_tmds_d0_p (HDMI_D0_P),
         .O_tmds_d1_p (HDMI_D1_P),
