@@ -101,6 +101,7 @@ module disp_top #(
     input  wire        menu_on,       // 1 = 画菜单面板；0 = 逐位透传
     input  wire [2:0]  menu_sel,      // 选中行 0..4（`>` 光标跟着它走；★ 2026-10-18 起 5 行 ⇒ 3 位）
     input  wire        menu_edit,     // ★ 2026-10-24：KEY2 确认（调节态）⇒ 选中格描边变红
+input  wire        menu_res_1024, // ★ 2026-10-25：菜单行 4「清晰」显示用（1=1024×768 / 0=800×600）
     // ---------------- ★★★ 2026-10-15【参数菜单·第2步】要显示的"活值" ----------------
     //   ★ 这两根纯接线：本模块一个门都不加，直接透传给 `menu_ovl` 去查字模。
     //   ★ **只读**：菜单只是"显示"这两个值，本步**没有任何写回**（第 3 步才通过
@@ -226,7 +227,12 @@ module disp_top #(
     output wire [15:0] o_abort_cnt,
     output wire [15:0] o_off_first,
     output wire [15:0] o_align_bad,
-    output wire        frame_start_o     // ★ 2026-10-23：帧首单拍（clk_pix 域）
+    output wire        frame_start_o,    // ★ 2026-10-23：帧首单拍（clk_pix 域）
+    // ★★★ 2026-10-25【不黑屏 · 切换白闪】1 = 整屏强制白：
+    //   ① 开机首张图装好之前（约 1.6 s，代替原来的黑屏/兜底页过渡）；
+    //   ② 拨 SW3 切分辨率、等下一张图请求来时，先白闪 50 ms 再重配置位流。
+    //   只改 RGB 数据、不动 de/vs ⇒ HDMI 时序完全不变。
+    input  wire        wb_white
 );
 
     // ============================================================
@@ -611,6 +617,7 @@ module disp_top #(
         .px_in(px_al),
         .px_out(px_m), .de_out(de_m), .vs_out(vs_m),
         .menu_on(menu_on), .menu_sel(menu_sel), .menu_edit(menu_edit),
+        .menu_res_1024(menu_res_1024),   // ★ 2026-10-25：行 4「清晰」数值（800/1024）
         // ★★★ 2026-10-15【参数菜单·第2步】把两个活值送进菜单层去查字模（纯接线、只读）
         .zoom_lv(menu_zoom_lv), .sel_aud(menu_sel_aud),
         // ★★★ 2026-10-24【行 1 换成可视化开关】：面板显示 ON/OFF 用（真实开关在 top_m2 的 viz_on）
@@ -630,6 +637,9 @@ module disp_top #(
         px_m[4:0],   px_m[4:2]
     };
 
+    // ★★★ 2026-10-25【不黑屏】整屏白：给 HDMI 的是「白 or 原图」二选一（de/vs 照旧）
+    wire [23:0] rgb_hdmi = wb_white ? 24'hFFFFFF : rgb888;
+
     // ============================================================
     //  HDMI（成品核，别动）
     // ============================================================
@@ -642,7 +652,7 @@ module disp_top #(
         .I_rst       (~rst_pix_n),
         .I_vs        (vs_m),           // ★ 改用菜单那一级之后的（和 rgb888 同拍）
         .I_de        (de_m),
-        .I_rgb       (rgb888),
+        .I_rgb       (rgb_hdmi),
         .O_tmds_clk_p(HDMI_CLK_P),
         .O_tmds_d0_p (HDMI_D0_P),
         .O_tmds_d1_p (HDMI_D1_P),

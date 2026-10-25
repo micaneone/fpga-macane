@@ -236,11 +236,18 @@
       input             name_inv,       // ★ 2026-10-21：1 = 反选（要求【不以】NAME1 开头）
       input             cmd,
       input      [3:0]  skip,
+      input             cnt_en,         // ★★★ 2026-10-25【自动数张数】1 = 本次查询顺带把根目录里
+                                        //     BMP/WAV/SUB 的条数各数一遍（只用于开机第一次查图）
       input      [31:0] in_cluster,
       // ---- 状态 ----
       output reg        busy,           // 引擎正在查文件（电平 → eng_busy）
       output reg        done,           // 单拍：查到了
       output reg        fail,           // 单拍：没查到 / 卡 / 坏卡
+      // ---- ★ 2026-10-25【自动数张数】cnt_en 那次查询的结果（根目录里非 EMG 的条数）----
+      output     [7:0]  cnt_bmp,        // .BMP 个数
+      output     [7:0]  cnt_wav,        // .WAV 个数
+      output     [7:0]  cnt_sub,        // .SUB 个数
+      output            cnt_valid,      // 单拍：计数有效（与 S_DONE 同拍）
       // ---- 引擎自己的读请求（薄壳拿去做让位仲裁）----
       output     [31:0] eng_lba,
       output            eng_req,
@@ -288,6 +295,16 @@
       reg [7:0]  dir_sec;        // 根目录已扫到第几个扇区
       reg [3:0]  hit_cnt;        // 已命中几个同扩展名文件
       reg [19:0] wdt;            // 看门狗
+
+      // ---- ★★★ 2026-10-25【自动数张数】----
+      //   cnt_en 那一次查询（开机第一次查图）把根目录整条扫完，数出三类文件各几条；
+      //   目录结束的判据 = 目录项首字节 0x00（FAT 规范）；同时排除 EMG* 报警素材。
+      reg        cnt_en_r;       // start 那拍锁存
+      reg        dir_end;        // 已经扫到目录项 0x00
+      reg [7:0]  cnt_bmp_r, cnt_wav_r, cnt_sub_r;
+      reg        entry_attr_ok;  // 属性字节合法（排除 LFN/卷标/目录）
+      reg        name_emg;       // 本条目录项名字以 "EMG" 开头
+      reg        cnt_valid_r;
 
       // ---- 从 MBR 抽出来 ----
       reg [31:0] part_base;      // 分区起始扇区
@@ -363,6 +380,16 @@
       wire [7:0] nm_u = (nm_b >= 8'h61 && nm_b <= 8'h7A) ? (nm_b - 8'd32) : nm_b;
       wire       nm_eq = (nm_b == 8'h00) ? 1'b1 : (sd_data == nm_u);
 
+      // ★★★ 2026-10-25【自动数张数】固定拿 NAME1（= "EMG"）判"是不是报警素材"
+      //   —— 和请求里选 AD/EMG 的那套无关，计数一律排除 EMG*。
+      wire [7:0] nb1m = NAME1[63 - byte_cnt[2:0]*8 -: 8];
+      wire [7:0] nb1u = (nb1m >= 8'h61 && nb1m <= 8'h7A) ? (nb1m - 8'd32) : nb1m;
+      wire       emg_eq = (nb1m == 8'h00) ? 1'b1 : (sd_data == nb1u);
+      // 扩展名匹配（'B','M','P' / 'W','A','V' / 'S','U','B'）
+      wire       ext_bmp_hit = (ext0 == 8'h42) && (ext1 == 8'h4D) && (ext2 == 8'h50);
+      wire       ext_wav_hit = (ext0 == 8'h57) && (ext1 == 8'h41) && (ext2 == 8'h56);
+      wire       ext_sub_hit = (ext0 == 8'h53) && (ext1 == 8'h55) && (ext2 == 8'h42);
+
       // FAT 表项在本扇区里的字节偏移：每扇区 128 项、每项 4 字节
       wire [9:0]  fat_off = {in_clus_r[6:0], 2'b00};   // 0,4,...,508
 
@@ -416,6 +443,12 @@
       assign eng_res_done    = done;
       assign eng_res_fail    = fail;
 
+      // ★★★ 2026-10-25【自动数张数】计数结果 / 有效脉冲
+      assign cnt_bmp   = cnt_bmp_r;
+      assign cnt_wav   = cnt_wav_r;
+      assign cnt_sub   = cnt_sub_r;
+      assign cnt_valid = cnt_valid_r;
+
       //======================================================================
       //  主状态机（★ 与原 find_bmp 逐字相同，只多了 ext_r / owner_r 锁存）
       //======================================================================
@@ -448,6 +481,11 @@
               res_cluster_r <= 32'd0;
               sec_per_clus <= 8'd0;  reserved <= 16'd0;  num_fats <= 8'd0;
               fat_size <= 32'd0;     root_cluster <= 32'd0;
+              // ★ 2026-10-25【自动数张数】
+              cnt_en_r <= 1'b0;   dir_end <= 1'b0;
+              cnt_bmp_r <= 8'd0;  cnt_wav_r <= 8'd0;  cnt_sub_r <= 8'd0;
+              cnt_valid_r <= 1'b0;
+              entry_attr_ok <= 1'b0;  name_emg <= 1'b0;
           end
           else begin
               done <= 1'b0;
@@ -473,9 +511,18 @@
         name_inv_r<= name_inv;     // ★ 2026-10-21
                       owner_r   <= owner;        // ★ 切法C：本拍锁存"发起者当家"
                       hit_cnt   <= 4'd0;
-                      dir_sec   <= 8'd0; 
+                      dir_sec   <= 8'd0;
                       found     <= 1'b0;
                       busy      <= 1'b1;
+                      // ★ 2026-10-25【自动数张数】：锁存本次要不要数、清计数器
+                      cnt_en_r    <= cnt_en;
+                      cnt_valid_r <= 1'b0;
+                      dir_end     <= 1'b0;
+                      if (cnt_en) begin
+                          cnt_bmp_r <= 8'd0;
+                          cnt_wav_r <= 8'd0;
+                          cnt_sub_r <= 8'd0;
+                      end
 
                       if (cmd == 1'b0 && !params_valid) begin
                           sd_lba <= 32'd0;          // 从 MBR 开始
@@ -553,20 +600,29 @@
                           if (byte_cnt[4:0] == 5'd0)
                               entry_live <= (sd_data != 8'h00) &&
                                             (sd_data != 8'hE5);
+                          // ★ 2026-10-25【自动数张数】：目录项首字节 0x00 = 目录结束
+                          if (byte_cnt[4:0] == 5'd0 && sd_data == 8'h00)
+                              dir_end <= 1'b1;
 
                           // ★ 2026-10-20：名字前缀（第 0~7 字节）累加比较
                           if (byte_cnt[4:0] == 5'd0)      name_ok <= nm_eq;
                           else if (byte_cnt[4:0] <= 5'd7) name_ok <= name_ok && nm_eq;
+                          // ★ 2026-10-25：同一套累加判"是不是 EMG*"（计数排除用）
+                          if (byte_cnt[4:0] == 5'd0)      name_emg <= emg_eq;
+                          else if (byte_cnt[4:0] <= 5'd7) name_emg <= name_emg && emg_eq;
 
                           if (byte_cnt[4:0] == 5'd8)  ext0 <= sd_data;
                           if (byte_cnt[4:0] == 5'd9)  ext1 <= sd_data;
                           if (byte_cnt[4:0] == 5'd10) ext2 <= sd_data;
 
-                          if (byte_cnt[4:0] == 5'd11)          // 属性字节
+                          if (byte_cnt[4:0] == 5'd11) begin       // 属性字节
                               entry_hit <= entry_live && ext_ok &&
                                            (!name_en_r || (name_inv_r ? !name_ok : name_ok)) &&
                                            ((sd_data & 8'h18) == 8'h00);
                               // 0x18 一次排除 LFN(0x0F)/卷标(0x08)/目录(0x10)
+                              // ★ 2026-10-25：计数也要过同一道属性闸
+                              entry_attr_ok <= ((sd_data & 8'h18) == 8'h00);
+                          end
 
                           // 命中、且正是我们要的那一个，才取簇号和大小
                           if (entry_hit && (hit_cnt == skip_r)) begin
@@ -585,6 +641,17 @@
 
                           if (byte_cnt[4:0] == 5'd31 && entry_hit)
                               hit_cnt <= hit_cnt + 1'b1;
+
+                          // ★★★ 2026-10-25【自动数张数】：一条目录项收完时按三类各数一份
+                          //   （条目必须 live + 属性合法 + 名字不是 EMG*）
+                          //   ★ 图片这一类必须再套上"和查图同一套名字过滤"（AD 类）——
+                          //     否则卡上 MAP* 等别的 BMP 也会被数进去，顶层会去轮不存在的图。
+                          if (byte_cnt[4:0] == 5'd31 && entry_live && entry_attr_ok && !name_emg) begin
+                              if (ext_bmp_hit && (!name_en_r || (name_inv_r ? !name_ok : name_ok)))
+                                  cnt_bmp_r <= cnt_bmp_r + 8'd1;
+                              if (ext_wav_hit) cnt_wav_r <= cnt_wav_r + 8'd1;
+                              if (ext_sub_hit) cnt_sub_r <= cnt_sub_r + 8'd1;
+                          end
                       end
                       //---- FAT 表：取第 in_clus_r 项 ---------------------------
                       P_FAT: begin
@@ -632,7 +699,20 @@
                       end
                   end
                   P_DIR: begin
-                      if (found)
+                      if (cnt_en_r) begin
+                          // ★★★ 2026-10-25【自动数张数】：这次必须扫到目录结束（首字节 0x00）
+                          //   才停 —— 否则数出来的不是总数。上界仍是 256 扇区。
+                          if (dir_end || dir_sec == 8'hFF) begin
+                              if (found) state <= S_DONE;
+                              else       state <= S_FAIL;
+                          end
+                          else begin
+                              dir_sec <= dir_sec + 8'd1;
+                              sd_lba  <= sd_lba + 32'd1;
+                              state   <= S_WAIT;
+                          end
+                      end
+                      else if (found)
                           state <= S_DONE;
                       // ★★★ 2026-10-14 深夜【修 FAT32 根目录跨簇扫描 · 零新增逻辑版】
                       //   缺陷：原来这里只扫「根目录第一个簇」（界限 = sec_per_clus 个扇区）
@@ -674,12 +754,14 @@
                   sd_req <= 1'b0;
                   done   <= 1'b1;
                   busy   <= 1'b0;
+                  cnt_valid_r <= cnt_en_r;   // ★ 2026-10-25：计数与 done 同拍有效
                   state  <= S_IDLE;
               end
               S_FAIL: begin
                   sd_req <= 1'b0;
                   fail   <= 1'b1;
                   busy   <= 1'b0;
+                  cnt_valid_r <= 1'b0;
                   state  <= S_IDLE;
               end
               default: state <= S_IDLE;

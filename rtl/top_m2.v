@@ -1034,13 +1034,25 @@ module top_m2 #(
 
     reg  alarm_audio_ok;
 
+    // ★ 2026-10-25【自动识别张数】A 轨 FAT 引擎数出来的根目录三类文件数
+
+    wire [7:0] img_total_w;
+
+    wire [7:0] aud_total_w;
+
+    wire [7:0] sub_total_w;
+
     // ★★★ 2026-10-24【一图一乐】u_ctrl 给出的"本次请求那张图的序号"（与 req_accept_w 同拍）
 
     wire [3:0] req_skip_w;
 
     // 图 k ⇒ 第 k 首音乐（2026-10-25【编号一一对应】去掉原来的 mod：5 张图配 5 首，不再出现"第 4 张图放第 1 首"）
 
-    wire [SEL_AUD_W-1:0] req_aud_mod = req_skip_w[SEL_AUD_W-1:0];
+    wire [SEL_AUD_W-1:0] req_aud_mod = (aud_total_w == 8'd0)      ? req_skip_w[SEL_AUD_W-1:0] :
+
+                                       (req_skip_w < aud_total_w) ? req_skip_w[SEL_AUD_W-1:0] :
+
+                                                                    {SEL_AUD_W{1'b1}};
 
 
 
@@ -1897,7 +1909,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     // ============================================================
 
-    localparam integer MENU_N = 4;                  // 菜单项数（★ 2026-10-20【D1·A2】：5→4，删掉行 4 VISUAL）★ menu_ovl 的 ROW_N 必须一样
+    localparam integer MENU_N = 5;                  // 菜单项数（★ 2026-10-25【加分辨率】：4→5，行 4 = 清晰 800/1024）★ menu_ovl 的 ROW_N 必须一样
 
     localparam integer MENU_W = 3;                  // 光标位宽（5 项 ⇒ 3 位）；改条数时这里也要改
 
@@ -2477,7 +2489,12 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     //     Apx=0、屏上没图。所以**必须先把素材改名**（AD1.BMP…）再把它改成 1。
 
-    localparam BMP_NAME_EN = 1'b1;   // ★ 2026-10-21：名字过滤在共享引擎里做，这里开着重合无害
+    // ★★★ 2026-10-25【自动识别张数·放开名字过滤】
+    //   改为 0（老行为：只按后缀 .BMP 找）。原因：用户把十几张图直接拷进卡根目录，
+    //   名字并不全是 AD*，开着过滤会让"数出来/轮播"只看到 AD* 那几张。
+    //   EMG*（报警素材）仍然由共享引擎的全局 `name_emg_only` 排除 —— 硬件保证还在，
+    //   所以放开名字过滤不会把报警素材混进正常轮播。
+    localparam BMP_NAME_EN = 1'b0;
 
     reg         auto_caro;                                   // 轮播开关
 
@@ -2650,6 +2667,9 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
     //   · 后台 viz_time 照样跑（它只旁听音频），重新打开立刻有图。
 
     wire viz_step = menu_edit & key3_step_press & (menu_sel == 3'd1);  // ★ 行 1：ON↔OFF 翻转（不看方向）
+    // ★★★ 2026-10-25【菜单加分辨率行】：行 4 = 清晰 ⇒ KEY3 拨一下 = 登记「切到另一套位流」请求
+    //     （不立即切：文件末尾 MBOOT 段会等轮播下一张图 adv_req_w 时才白闪 + 重配置）
+    wire res_step = menu_edit & key3_step_press & (menu_sel == 3'd4);
 
     reg  viz_on;                                                        // 1 = 显示 / 0 = 关闭
 
@@ -3192,6 +3212,10 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
         .sd_ready(sd_ready_eff), .sd_lost_i(sd_lost_rise), .alert_rst_i(alert_rst_pulse),
         .a_busy(a_busy), .hold(stwr_busy),
 
+        // ★ 2026-10-25【自动识别张数】卡上有几张图（0 = 还没数出来 ⇒ 退回参数 IMG_N）
+
+        .img_n(img_total_w),
+
         // ★ 转场握手：屏上全米白了才真的去装；转场期间不受理新请求
 
         .may_load(ml2), .tr_active(ac2),
@@ -3373,6 +3397,10 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
         .ready_n(a_ready_n), .fail(a_fail), .o_fail_src(a_fail_src),
         .o_sub_dbg(a_sub_dbg),
+        // ★ 2026-10-25【自动识别张数】引擎数出来的根目录张数
+
+        .o_img_total(img_total_w), .o_aud_total(aud_total_w), .o_sub_total(sub_total_w),
+
     .sd_ready(a_sd_ready), .led_init(),
         .o_fe_done(a_fe_done),
 
@@ -4690,6 +4718,14 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
 
 
+    // ★★★ 2026-10-25【不黑屏 · 切换白闪】整屏白门控（产生逻辑在文件末尾 MBOOT 段）
+    // ★★★ 2026-10-25【菜单加分辨率行】本镜像分辨率：0 = 800×600（build800 树，RES_JUMP_ADDR=0x0A）
+    //     主树（1024×768，RES_JUMP_ADDR=0x00）里是 1'b1。
+    wire menu_res_1024 = 1'b0;
+
+    // ★★★ 2026-10-25【不黑屏 · 切换白闪】整屏白门控（产生逻辑在文件末尾 MBOOT 段）
+    wire wb_white;
+
     disp_top u_disp (
 
         .clk_pix(clk_pix), .clk_par(clk_par), .clk_ser(clk_ser),
@@ -4773,6 +4809,10 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
         //   （disp_top 里用 `~menu_viz_on` 把柱形 mask 和压暗 band 一起门掉）
 
         .menu_viz_on(viz_s2),
+
+        // ★★★ 2026-10-25【菜单加分辨率行】：行 4「清晰」显示本镜像分辨率（0=800×600）
+
+        .menu_res_1024(menu_res_1024),
 
         // ★★★ 2026-10-21【D2 · B1/B2 兜底页】：没卡 / 坏图 / 装载中 ⇒ 深底自检页（代替米白空屏）
 
@@ -4862,6 +4902,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
         ,.o_off_first(lb_off), .o_align_bad(lb_alignbad)
     ,.frame_start_o(frame_start_pix)
+    ,.wb_white(wb_white)          // ★★★ 2026-10-25【不黑屏】整屏白门控（开机首图前 / 切换白闪）
 
     );
 
@@ -5769,7 +5810,10 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
             //     所以"同拍既置位又受理"时以"受理并清零"为准（正是我们要的）。
 
-            if (sw3_change) sw3_pend <= 1'b1;
+            // ★★★ 2026-10-25【MULTI BOOT】SW3 改为「切显示分辨率」，手动切歌停用：
+            //   音乐现在由「一图一乐」跟着图片自动走（图 k ⇒ 第 k 首），不再需要拨开关。
+            //   拨 SW3 只登记一次分辨率切换请求，等到「下一张图」的请求到来时才重配置位流。
+            if (1'b0) sw3_pend <= 1'b1;
 
             // ---- 什么时候响一次音效 ----
 
@@ -5873,7 +5917,9 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
             //   ★ 对正常路径逐位无影响：`aud_loaded=1, aud_fail=0` 时条件与原式等价。
 
-            if ((sw3_pend || sw3_change) && (aud_loaded || aud_fail)) begin
+            // ★★★ 2026-10-25【MULTI BOOT】SW3 改作切分辨率 ⇒ 音频手动切歌分支停用
+            //   （保留块体只为让下面的注释/历史可查；条件恒假，TD 会整块优化掉。）
+            if (1'b0) begin
 
                 aud_loaded <= 1'b0;        // 让它重走装载（= 音效也像图片一样每次刷新）
 
@@ -7226,5 +7272,82 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
     end
     wire spk_gate = (spk_gate_cnt < 25'd20_000_000);
     assign spk = alert_on & spk_gate & spk_tone;
+
+    // ============================================================
+    //  ★★★ 2026-10-25【MULTI BOOT · SW3 切显示分辨率】
+    // ------------------------------------------------------------
+    //  · FLASH 里放两套位流（W25Q16，16 Mbit = 2 MB）：
+    //        0x000000：800×600 版（Primary，本镜像）
+    //        0x0A0000：1024×768 版（Second）
+    //  · 拨 SW3 = 登记一次「切到另一套」的请求；当前这张图不切，
+    //    等轮播下一次请求换图（adv_req_w）时才把 rebootn 拉低 ⇒ FPGA 从
+    //    另一套位流的起始地址重新配置（黑屏约 0.2~0.4 s），随后换分辨率启动。
+    //  · 两套代码唯一差别就是下面 RES_JUMP_ADDR：本镜像（800×600，烧 0x000000）
+    //    填 8'h0A → 跳到 1024×768；1024×768 版（烧 0x0A0000）填 8'h00 → 跳回本镜像。
+    //    （dynamic_addr 是跳转地址的高 8 位：8'h0A = 0x0A0000，8'h00 = 0x000000。）
+    // ============================================================
+    localparam [7:0] RES_JUMP_ADDR = 8'h0A;   // ★ 本镜像 = 800×600（烧 0x000000）→ 跳到 1024×768 的 0x0A0000
+
+    reg res_switch_pend;   // SW3 已拨过：等「下一张图」再切
+    reg mboot_reboot_n;    // EG_LOGIC_MBOOT 的 rebootn（低有效 = 从 FLASH 另一地址重载）
+
+    // ---- ★★★ 2026-10-25【不黑屏】白闪：重配置黑屏用「白闪 + 新图」代替 ----
+    //  原来：下一张图请求 → 立刻重配置 → 电视黑屏 0.2~0.4 s → 新分辨率首图（还要 1.5 s）→ 很突兀。
+    //  现在：①开机（含重配置后的新镜像）先整屏白 ~1.6 s，盖住 SD 装首图那段；
+    //        ②切换时先把当前画面整屏白闪 50 ms，再拉低 rebootn 重配置；
+    //        ③新镜像启动又是白屏 → 装好首图直接出画面。
+    //  观感 =「白闪一下 → 新图」，黑屏被白闪吃掉了。
+    reg        wb_switch_white;      // 切换白闪中
+    reg [22:0] wb_dly;               // 白闪计时
+    reg [26:0] wb_boot_cnt;          // 开机计数（白屏时长）
+    localparam [26:0] WB_BOOT_TICKS = 27'd80_000_000;  // 1.6 s @ 50 MHz
+    localparam [22:0] WB_DLY_TICKS  = 23'd2_500_000;   // 50 ms @ 50 MHz
+    wire wb_boot_white = (wb_boot_cnt < WB_BOOT_TICKS);
+
+    always @(posedge clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin
+            res_switch_pend <= 1'b0;
+            mboot_reboot_n  <= 1'b1;
+            wb_switch_white <= 1'b0;
+            wb_dly          <= 23'd0;
+            wb_boot_cnt     <= 27'd0;
+        end
+        else begin
+            // 开机白屏计时
+            if (wb_boot_cnt < WB_BOOT_TICKS)
+                wb_boot_cnt <= wb_boot_cnt + 1'b1;
+
+            // ① SW3 只登记，这一张图不动
+            if (sw3_change || res_step)
+                res_switch_pend <= 1'b1;
+
+            // ② 「下一张图」的请求来了 → 先白闪，不马上切
+            if (res_switch_pend && adv_req_w && !wb_switch_white) begin
+                res_switch_pend <= 1'b0;
+                wb_switch_white <= 1'b1;
+                wb_dly          <= 23'd0;
+            end
+
+            // ③ 白闪满 50 ms → 才拉低 rebootn 重配置（此刻屏幕已经是白的）
+            if (wb_switch_white) begin
+                if (wb_dly >= WB_DLY_TICKS) begin
+                    wb_switch_white <= 1'b0;
+                    mboot_reboot_n  <= 1'b0;
+                end
+                else
+                    wb_dly <= wb_dly + 1'b1;
+            end
+        end
+    end
+
+    assign wb_white = wb_boot_white | wb_switch_white;
+
+    EG_LOGIC_MBOOT #(
+        .ADDR_SOURCE_SEL ("DYNAMIC"),
+        .STATIC_ADDR     (8'b00000000)
+    ) u_mboot (
+        .rebootn      (mboot_reboot_n),
+        .dynamic_addr (RES_JUMP_ADDR)
+    );
 
 endmodule

@@ -77,6 +77,10 @@ module stub_ctrl #(
     input  wire        alert_rst_i,    // ★ 2026-10-22：收到报警（SW4 上升沿）的单拍脉冲 ⇒ 同一套整块软复位
     input  wire        a_busy,         // A：正在装载（装载期间不再触发）
     input  wire        hold,           // 1 = 别触发（B 自测图正在写大槽 0）
+    // ★ 2026-10-25【自动识别张数】卡上根目录到底有几张图（顶层从 FAT 引擎数出来送进来）
+    //   = 0 表示"还没数出来"（上电最初几毫秒）⇒ 退回参数 IMG_N（缺省 5）
+    //   一旦数出来，轮播回绕、预装、"第几张"全部按真实张数走 ⇒ 卡上几张就轮几张。
+    input  wire [7:0]  img_n,
 
     // ---- ★★ 2026-10-03（转场 ④）新增：和 transition_ctrl 打交道 ----
     //  触发被拆成【两段】，中间隔着一次转场：
@@ -158,6 +162,11 @@ module stub_ctrl #(
     wire ctl_rst_n = rst_n & ~soft_rst;
 
     localparam integer AUTO_TICKS = (CLK_HZ / 1000) * AUTO_DELAY_MS;
+
+    // ★ 2026-10-25【自动识别张数】轮播回绕用的"最后一张"序号
+    //   img_n = 0（还没数出来）⇒ 用参数 IMG_N 兜底；数出来（≥1）⇒ 用真实张数。
+    localparam [7:0] IMG_N8 = IMG_N;
+    wire [7:0] img_last = (img_n == 8'd0) ? (IMG_N8 - 8'd1) : (img_n - 8'd1);
 
     reg [31:0] auto_cnt;
     reg        auto_fired;
@@ -284,7 +293,7 @@ module stub_ctrl #(
                 a_start  <= 1'b1;
                 a_skip   <= next_no[3:0];
                 a_img_no <= next_no + 8'd1;
-                next_no  <= (next_no == (IMG_N-1)) ? 8'd0 : (next_no + 8'd1);   // ★ 轮播回绕
+                next_no  <= (next_no >= img_last) ? 8'd0 : (next_no + 8'd1);   // ★ 轮播回绕（2026-10-25：按卡上真实张数 img_n）
                 req_pend <= 1'b0;
                 need_load <= 1'b0;
                 load_inflight <= 1'b1;                 // ★ 预装：记下"有一张在路上"
@@ -303,7 +312,7 @@ module stub_ctrl #(
                 a_start       <= 1'b1;
                 a_skip        <= next_no[3:0];
                 a_img_no      <= next_no + 8'd1;
-                next_no       <= (next_no == (IMG_N-1)) ? 8'd0 : (next_no + 8'd1);  // ★ 轮播回绕
+                next_no       <= (next_no >= img_last) ? 8'd0 : (next_no + 8'd1);  // ★ 轮播回绕（2026-10-25：按卡上真实张数 img_n）
                 load_inflight <= 1'b1;
             end
 

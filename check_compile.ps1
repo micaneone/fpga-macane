@@ -92,7 +92,9 @@ $extra = @(
     # INIT_FILE=font_cn.dat).  The TD model in sim_release is encrypted AND
     # ignores INIT_FILE (verified 2026-10-25: reads all zeros), so use our own
     # behavioural stand-in that does $readmemb from the .dat file.
-    (Join-Path $m0 'eg_phy_bram32k_behav.v')
+    (Join-Path $m0 'eg_phy_bram32k_behav.v'),
+    # 2026-10-25: EG_LOGIC_MBOOT stand-in (MULTI BOOT reconfig).
+    (Join-Path $m0 'eg_logic_mboot_behav.v')
 )
 
 # flat mirror: global_def.v is `include`d by path-less name
