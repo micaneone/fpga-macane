@@ -1048,6 +1048,12 @@ module top_m2 #(
 
     wire [7:0] sub_total_w;          // *.SUB 张数（= 卡上有几条字幕）
 
+    // ★ 2026-10-25【数码管显示分辨率】最近一次装进大槽的源图尺寸（A 轨报的）
+
+    wire [15:0] img_w_dbg;
+
+    wire [15:0] img_h_dbg;
+
     // 图 k ⇒ 第 k 首音乐（2026-10-25【编号一一对应】去掉原来的 mod：5 张图配 5 首，不再出现"第 4 张图放第 1 首"）
 
     //   ★ 2026-10-25【自动识别张数】：卡上音乐比图少时，多出来的图 ⇒ 无效索引 0x3F ⇒ 音频装载失败 ⇒
@@ -3404,6 +3410,10 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
         .o_sub_dbg(a_sub_dbg),
         // ★ 2026-10-25【自动识别张数】引擎数出来的根目录张数（首次装图时顺带数一遍）
         .o_img_total(img_total_w), .o_aud_total(aud_total_w), .o_sub_total(sub_total_w),
+
+        // ★ 2026-10-25【数码管显示分辨率】源图尺寸直出（宽/高）
+
+        .o_img_w(img_w_dbg), .o_img_h(img_h_dbg),
     .sd_ready(a_sd_ready), .led_init(),
         .o_fe_done(a_fe_done),
 
@@ -6940,7 +6950,8 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
         //   ⇒ 这一版既有显示、又有音频，一次烧录就能同时判这两条。
 
-        .sb_rise (aud_avg_dbg),    // ★★★ 2026-10-24 临时调试：音频数字平均幅度（原：字幕传输帧数 sub_ft）
+        .sb_rise ({8'hB1, 8'd5}),  // ★★★ 2026-10-25【临时建造标记】原为音频幅度探针；本轮改成常量 0xB105
+                                   //     用来看"板子上跑的是不是这次构建"（串口字段 30 = 0xB105 即是）
 
         .sb_col  (aud_gate_dbg),   // ★★★ 2026-10-24 临时：音频 FSM 门信号位图（原：字幕超时 sub_rt）
 
@@ -7150,9 +7161,47 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     //  回退：把 `seg_decoder`/`seg_scan` 的实例加回来即可（模块仍在 lib\util\）。
 
-    assign seg_sel  = 6'd0;
-
-    assign seg_data = 8'hFF;      // 段码低有效 ⇒ 全 1 = 全灭
+    // ============================================================
+    //  8. 数码管：左三位 = 源图分辨率，右三位 = 轮播状态 + 图号
+    //  ------------------------------------------------------------
+    //  ★ 2026-10-25【用户需求 2】"左边的数码管显示读到的图片的分辨率，
+    //     右边显示轮播 + 图片编号"。
+    //  位分配（沿用旧代码约定：digit5 = 最左边）：
+    //     digit5..3 = 最近一次装进大槽的源图分辨率（宽；宽≥1000 时显示高）
+    //     digit2    = 状态：A = 自动轮播中，P = 已暂停（KEY3 在非菜单时开关轮播）
+    //     digit1    = 图号十位
+    //     digit0    = 图号个位
+    //  a_img_no 是 1 基序号（第 1 张 = 1），开机还没装过图时右三位显示 000。
+    // ============================================================
+    //  图号：超过 99 截到 99（两位物理上限；本卡 8~十几张）
+    wire [6:0] seg_img8 = (a_img_no > 8'd99) ? 7'd99 : a_img_no[6:0];
+    wire [3:0] seg_tens = seg_img8 / 7'd10;
+    wire [3:0] seg_ones = seg_img8 - (seg_tens * 4'd10);
+    //  分辨率：优先显示宽度；宽度 ≥1000（如 1024/1536/1920）三位放不下 → 改显示高度。
+    //  超过 999 的极端值截到 999（三位物理上限）。
+    wire [11:0] seg_res_raw = (img_w_dbg >= 16'd1000) ? img_h_dbg[11:0] : img_w_dbg[11:0];
+    wire [9:0]  seg_res     = (seg_res_raw > 12'd999) ? 10'd999 : seg_res_raw[9:0];
+    wire [3:0]  seg_r100    = seg_res / 10'd100;
+    wire [3:0]  seg_r10     = (seg_res / 10'd10) - (seg_r100 * 4'd10);
+    wire [3:0]  seg_r1      = seg_res - (seg_r100 * 4'd100) - (seg_r10 * 4'd10);
+    localparam [7:0] SEG_AUTO  = 8'h88;   // 'A'：a/b/c/e/f/g 亮，小数点灭
+    localparam [7:0] SEG_PAUSE = 8'h8C;   // 'P'：a/b/e/f/g 亮
+    wire [6:0] seg_td, seg_od, seg_rh, seg_rt, seg_ro;
+    seg_decoder u_seg_tens (.bin_data(seg_tens), .seg_data(seg_td));
+    seg_decoder u_seg_ones (.bin_data(seg_ones), .seg_data(seg_od));
+    seg_decoder u_seg_res_h(.bin_data(seg_r100), .seg_data(seg_rh));
+    seg_decoder u_seg_res_t(.bin_data(seg_r10 ), .seg_data(seg_rt));
+    seg_decoder u_seg_res_o(.bin_data(seg_r1  ), .seg_data(seg_ro));
+    seg_scan #(.SCAN_FREQ(200), .CLK_FREQ(50_000_000)) u_seg (
+        .clk(clk), .rst_n(sys_rst_n),
+        .seg_sel(seg_sel), .seg_data(seg_data),
+        .seg_data_0({1'b1, seg_od}),                    // 图号个位（最右）
+        .seg_data_1({1'b1, seg_td}),                    // 图号十位
+        .seg_data_2(auto_caro ? SEG_AUTO : SEG_PAUSE),  // 状态
+        .seg_data_3({1'b1, seg_ro}),                    // 分辨率 个位
+        .seg_data_4({1'b1, seg_rt}),                    // 分辨率 十位
+        .seg_data_5({1'b1, seg_rh})                     // 分辨率 百位（最左）
+    );
 
 
 

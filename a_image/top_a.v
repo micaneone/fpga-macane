@@ -185,7 +185,12 @@
             output [15:0] o_img_bpp,        // 最近一次 BMP 头里的位深（0 = 还没读到）
             output [31:0] o_aud_rate,       // 最近一次 WAV fmt 里的采样率
             output [15:0] o_aud_bits,       // 位深
-            output        o_aud_info_valid  // 上面两个值有效
+            output        o_aud_info_valid, // 上面两个值有效
+
+            // ★ 2026-10-25【数码管显示分辨率】最近一次装进大槽的源图尺寸
+            //   顶层数码管左边三位显示它（宽；宽≥1000 时显示高）
+            output [15:0] o_img_w,
+            output [15:0] o_img_h
         );
 
             //======================================================================
@@ -404,6 +409,9 @@
             assign o_img_total = img_total_r;
             assign o_aud_total = aud_total_r;
             assign o_sub_total = sub_total_r;
+            // ★ 2026-10-25：源图尺寸直出（给顶层数码管显示分辨率用）
+            assign o_img_w     = img_width;
+            assign o_img_h     = img_height;
 
             // ---- 谁在查（★ 全部用**组合的** sd_mode，和 start 的分配口径一致）----
             //   因为 start 就是组合分发的（`start & (sd_mode==N)`），同一拍必须能对上号。
