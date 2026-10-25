@@ -974,7 +974,7 @@ module top_m2 #(
 
     //
 
-    //  选择寄存器 `sel_aud`：按 `SFX_NUM`（=2）取模循环，**SW3 每拨一次 +1**。
+    //  选择寄存器 `sel_aud`：在 `SFX_NUM` 条之间循环，**SW3 每拨一次 +1**（自动换歌见下面"一图一乐"）。
 
     //    ★ 位宽由 `SFX_NUM` 决定（2 条 ⇒ 1 位），改条数时只改上方的 localparam 即可。
 
@@ -982,7 +982,11 @@ module top_m2 #(
 
     //      所以三个"要动的东西"（skip / 重装 / 串口字段27）永远是同一拍、同一个事件。
 
-    localparam integer SFX_NUM    = 4;            // ★★★ 2026-10-15【用户要求】卡上 4 个 .WAV ⇒ 在 4 条之间循环（SEL_AUD_W = 2 位：0/1/2/3）。★ 必须与卡上实际 .WAV 条数一致：设大了会拨到空位 ⇒ find_bmp 失败 ⇒ a_fail ⇒ 音频链停住（需 KEY4 恢复）            // ★★★ 2026-10-15【用户要求】卡上 3 个 .WAV ⇒ 在 3 条之间循环（SEL_AUD_W 自动变 2 位：0/1/2）。★ 改动这里必须与卡上实际 .WAV 条数一致：设大了会拨到空位 ⇒ find_bmp 失败 ⇒ a_fail ⇒ 音频链停住（需 KEY4 恢复）            // 音效条数（★ 改了这里，也要同步下面 top_aud 的 .SFX_NUM）
+    localparam integer SFX_NUM    = 5;            // ★★★ 2026-10-25【用户要求·编号一一对应】卡上 5 个 .WAV ⇒ 图 k 配第 k 首（SEL_AUD_W 自动变 3 位：0..4）。
+                                                  //     ★ 必须与卡上实际 .WAV 条数一致：设大了会拨到空位 ⇒ find_bmp 失败 ⇒ a_fail ⇒ 音频链停住（需 KEY4 恢复）；
+                                                  //       设小了则最后一张图的配乐回不到第 5 首。卡上还必须有 5 张 .BMP（IMG_N=5），一一对应才成立。
+                                                  //     ★ 改了这里，top_aud 的 .SFX_NUM 是同一个宏（见下面例化），不用改两处。
+                                                  // 音效条数（★ 2026-10-15 起由 4 条改为 5 条；更早的 2/3 条历史注释已删）
 
     // ---- ★ D5b【报警音】提前声明：`a_sd_skip` 在下面几百行之前就要用它 ----
 
@@ -1034,9 +1038,9 @@ module top_m2 #(
 
     wire [3:0] req_skip_w;
 
-    // 图 k ⇒ 第 (k mod SFX_NUM) 首音乐（卡上 4 首音乐、5 张图 ⇒ 第 5 张回到第 1 首）
+    // 图 k ⇒ 第 k 首音乐（2026-10-25【编号一一对应】去掉原来的 mod：5 张图配 5 首，不再出现"第 4 张图放第 1 首"）
 
-    wire [SEL_AUD_W-1:0] req_aud_mod = req_skip_w % SFX_NUM;
+    wire [SEL_AUD_W-1:0] req_aud_mod = req_skip_w[SEL_AUD_W-1:0];
 
 
 
@@ -3123,7 +3127,8 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
             zoom_s1 <= zoom_lv;  zoom_s2 <= zoom_s1;
 
-            aud_s1  <= sel_aud;  aud_s2  <= aud_s1;
+            // ★ 2026-10-25：菜单行 1 已改为可视化开关、不再显示音轨号，这里只留 2 位（显式截断，避免位宽告警）
+            aud_s1  <= sel_aud[1:0];  aud_s2 <= aud_s1;
 
             vol_s1  <= vol_lv;   vol_s2  <= vol_s1;
 
@@ -5799,7 +5804,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
             //     `aud_st==2` 分支的 `aud_play_req <= 1'b1` 必须能覆盖这一句。
 
-            // ★★★ 2026-10-24【一图一乐】换图 ⇒ 音乐跟着换（第 k 张图配第 (k mod SFX_NUM) 首）
+            // ★★★ 2026-10-24【一图一乐】换图 ⇒ 音乐跟着换（第 k 张图配第 k 首；2026-10-25 去掉 mod，5 图 5 曲一一对应）
             //   · u_ctrl 在受理请求那一拍给出"这张图是第几张"(req_skip_w)，这里换算成音乐序号；
             //   · req_aud_mod == sel_aud 说明"这张图的配乐就是当前这首"⇒ 什么都不做；
             //   · 否则用的是和下面 SW3 切歌完全一样的三件套：清 loaded/fail、进 1 态重新装、
