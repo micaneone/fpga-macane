@@ -1038,9 +1038,26 @@ module top_m2 #(
 
     wire [3:0] req_skip_w;
 
+    // ★ 2026-10-25【自动识别张数】A 轨 FAT 引擎数出来的根目录三类文件数
+    //   （第一次装图时让引擎顺带数一遍，见 a_image/top_a.v 的 cnt_pending）
+    //   = 0 表示"还没数出来"（上电最初几毫秒），此时各处退回原来写死的上限。
+
+    wire [7:0] img_total_w;          // AD*.BMP 张数（= 轮播一次循环几张）
+
+    wire [7:0] aud_total_w;          // *.WAV 张数（= 卡上有几首配乐）
+
+    wire [7:0] sub_total_w;          // *.SUB 张数（= 卡上有几条字幕）
+
     // 图 k ⇒ 第 k 首音乐（2026-10-25【编号一一对应】去掉原来的 mod：5 张图配 5 首，不再出现"第 4 张图放第 1 首"）
 
-    wire [SEL_AUD_W-1:0] req_aud_mod = req_skip_w[SEL_AUD_W-1:0];
+    //   ★ 2026-10-25【自动识别张数】：卡上音乐比图少时，多出来的图 ⇒ 无效索引 0x3F ⇒ 音频装载失败 ⇒
+    //     按"缺配套不沿用上一张"的口径静音（不会拿第 1 首凑数）。aud_total=0（还没数）时退回旧行为。
+
+    wire [SEL_AUD_W-1:0] req_aud_mod = (aud_total_w == 8'd0)      ? req_skip_w[SEL_AUD_W-1:0] :
+
+                                       (req_skip_w < aud_total_w) ? req_skip_w[SEL_AUD_W-1:0] :
+
+                                                                    {SEL_AUD_W{1'b1}};
 
 
 
@@ -2477,7 +2494,12 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     //     Apx=0、屏上没图。所以**必须先把素材改名**（AD1.BMP…）再把它改成 1。
 
-    localparam BMP_NAME_EN = 1'b1;   // ★ 2026-10-21：名字过滤在共享引擎里做，这里开着重合无害
+    // ★★★ 2026-10-25【自动识别张数·放开名字过滤】
+    //   改为 0（老行为：只按后缀 .BMP 找）。原因：用户把十几张图直接拷进卡根目录，
+    //   名字并不全是 AD*，开着过滤会让"数出来/轮播"只看到 AD* 那几张。
+    //   EMG*（报警素材）仍然由共享引擎的全局 `name_emg_only` 排除 —— 硬件保证还在，
+    //   所以放开名字过滤不会把报警素材混进正常轮播。
+    localparam BMP_NAME_EN = 1'b0;
 
     reg         auto_caro;                                   // 轮播开关
 
@@ -3195,6 +3217,10 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
         .sd_ready(sd_ready_eff), .sd_lost_i(sd_lost_rise), .alert_rst_i(alert_rst_pulse),
         .a_busy(a_busy), .hold(stwr_busy),
 
+        // ★ 2026-10-25【自动识别张数】卡上有几张图（0 = 还没数出来 ⇒ 模块内退回参数 IMG_N）
+
+        .img_n(img_total_w),
+
         // ★ 转场握手：屏上全米白了才真的去装；转场期间不受理新请求
 
         .may_load(ml2), .tr_active(ac2),
@@ -3376,6 +3402,8 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
         .ready_n(a_ready_n), .fail(a_fail), .o_fail_src(a_fail_src),
         .o_sub_dbg(a_sub_dbg),
+        // ★ 2026-10-25【自动识别张数】引擎数出来的根目录张数（首次装图时顺带数一遍）
+        .o_img_total(img_total_w), .o_aud_total(aud_total_w), .o_sub_total(sub_total_w),
     .sd_ready(a_sd_ready), .led_init(),
         .o_fe_done(a_fe_done),
 

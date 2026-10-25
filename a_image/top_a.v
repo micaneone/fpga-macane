@@ -136,6 +136,12 @@
             output [5:0]  o_fail_src,
             output [23:0] o_sub_dbg,           // 2026-10-23 诊断：{失因位, 前两字节}
        // ★ 2026-10-23 诊断：{sub_short,sub_overrun,sub_an_fail,wav_an_fail,overrun,bmp|size_bad}
+            // ★ 2026-10-25【自动识别张数】FAT 引擎计数模式的结果
+            //   第一次装图（bmp_start）时让引擎顺带数一遍根目录（临时，几十微秒），
+            //   顶层拿去做「动态张数」：卡上几张就轮几张，音乐/字幕按张数夹住。
+            output [7:0]  o_img_total,      // 根目录 AD*.BMP 张数（已排除 EMG*）
+            output [7:0]  o_aud_total,      // 根目录 *.WAV 张数
+            output [7:0]  o_sub_total,      // 根目录 *.SUB 张数
             output        o_fe_done,        // ★ 单拍：SD 前端刚读完一个扇区（扇区级进度，给顶层挂死看门狗用）
 
             // ---------------- SDRAM 写口 → 接 sdr_arb（9/28 定稿那套）----------------
@@ -361,6 +367,44 @@
             wire wav_start = start & (sd_mode == 2'd1);
             wire sub_start = start & (sd_mode == 2'd2);
 
+            //==================================================================
+            //  ★ 2026-10-25【自动识别张数】第一次装图时顺带数一遍根目录
+            //    *** 为什么需要它 ***
+            //    以前 IMG_N / SFX_NUM 写死在 5，卡上第 6 张起的图片永远轮不到。
+            //    这里让引擎在查图（skip=0）那一次开启计数模式：把根目录
+            //    AD*.BMP / *.WAV / *.SUB 各数一遍（临时，几十微秒），再回给顶层做
+            //    动态上限。计数失败时（引擎 S_FAIL / cnt_valid=0）会在下一次装图重试。
+            //==================================================================
+            reg         cnt_pending;        // 还没数过：让下一次引擎启动带上计数
+            reg         cnt_done;           // 已数并存好（只做一次）
+            reg  [7:0]  img_total_r, aud_total_r, sub_total_r;
+            wire        eng_cnt_valid;
+            wire [7:0]  eng_cnt_bmp, eng_cnt_wav, eng_cnt_sub;
+
+            always @(posedge sys_clk or negedge sys_rst_n) begin
+                if (!sys_rst_n) begin
+                    cnt_pending <= 1'b0;
+                    cnt_done    <= 1'b0;
+                    img_total_r <= 8'd0;
+                    aud_total_r <= 8'd0;
+                    sub_total_r <= 8'd0;
+                end
+                else begin
+                    if (bmp_start && !cnt_done)         cnt_pending <= 1'b1;
+                    else if (eng_cnt_valid)             cnt_pending <= 1'b0;
+                    if (eng_cnt_valid) begin
+                        img_total_r <= eng_cnt_bmp;
+                        aud_total_r <= eng_cnt_wav;
+                        sub_total_r <= eng_cnt_sub;
+                        cnt_done    <= 1'b1;
+                    end
+                end
+            end
+
+            assign o_img_total = img_total_r;
+            assign o_aud_total = aud_total_r;
+            assign o_sub_total = sub_total_r;
+
             // ---- 谁在查（★ 全部用**组合的** sd_mode，和 start 的分配口径一致）----
             //   因为 start 就是组合分发的（`start & (sd_mode==N)`），同一拍必须能对上号。
             //   引擎在 start 那拍把 owner / 扩展名 / skip 一起锁存，之后整次查询不再看它们。
@@ -481,7 +525,14 @@
                 .eng_res_size    (eng_res_size),
                 .eng_res_cluster (eng_res_cluster),
                 .eng_res_done    (eng_res_done),
-                .eng_res_fail    (eng_res_fail)
+                .eng_res_fail    (eng_res_fail),
+
+                // ★ 2026-10-25【自动识别张数】计数模式（start 拍锁存 cnt_en，done 拍给结果）
+                .cnt_en          (cnt_pending),
+                .cnt_bmp         (eng_cnt_bmp),
+                .cnt_wav         (eng_cnt_wav),
+                .cnt_sub         (eng_cnt_sub),
+                .cnt_valid       (eng_cnt_valid)
             );
 
             // ★ 引擎的结果已经打过一拍；广播给三条链（只有发起者那拍在听）
