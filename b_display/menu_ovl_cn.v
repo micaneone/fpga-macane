@@ -187,6 +187,7 @@ module menu_ovl_cn #(
     reg [4:0] lv10;
     always @(*) begin
         v_c3 = CH_BLANK; v_c4 = CH_BLANK; v_c5 = CH_BLANK; v_c6 = CH_BLANK;
+        lv10 = 5'd0;                                   // 行 0/1 不用；给默认值免推 latch
         case (row_now)
             3'd0: v_c6 = CH_0 + {2'b00, zoom_lv};              // 0..5 适配/1x/1.5x/2x/3x/4x
             3'd1: v_c6 = viz_on ? CH_ON : CH_OFF;              // 开 / 关
@@ -217,7 +218,6 @@ module menu_ovl_cn #(
 
     // ---- 第①级打拍：几何/选中/字符 全部进寄存器 ----
     reg        q_de, q_vs, q_fill, q_sel, q_frm, q_gly;
-    reg [4:0]  q_ch, q_gy, q_lx;
     reg [15:0] q_px, q_dim;
 
     always @(posedge clk_pix) begin
@@ -227,21 +227,24 @@ module menu_ovl_cn #(
         q_sel  <= menu_on && in_cell &&  is_sel && b_sel;
         q_frm  <= menu_on && in_cell && !is_sel && b_norm;
         q_gly  <= menu_on && in_gly;
-        q_ch   <= g_ch;
-        q_gy   <= gy;
-        q_lx   <= lx;
         q_px   <= px_in;
         q_dim  <= px_dim;
     end
 
     // ============================================================
-    //  2. 第②级：字模查表（组合 ROM）+ 调色输出
+    //  2. 第②级：字模查表（BRAM ROM，1 拍）+ 调色输出
+    //  ★ 2026-10-25：字模从组合 case 搬进一块 EG_PHY_BRAM32K（INIT_FILE=
+    //    font_cn.dat），省 ~600 LUT。BRAM 地址必须用"未打拍"的 g_ch/gy/lx
+    //    （组合量）——同一时钟沿 BRAM 采地址，下一拍 doa/dob 才有效，
+    //    而那个"下一拍"正好是 q_ch/q_lx 所在的这一拍 ⇒ 第②级不用加流水，
+    //    菜单总延迟仍 2 拍（下游 disp_top 不动）。数字仍是 7 段组合。
     // ============================================================
     wire font_px;
     font_cn u_font (
-        .ch  (q_ch),
-        .row (q_gy),
-        .col (q_lx),
+        .clk (clk_pix),
+        .ch  (g_ch),
+        .row (gy),
+        .col (lx),
         .px  (font_px)
     );
 

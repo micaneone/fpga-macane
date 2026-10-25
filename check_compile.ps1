@@ -87,7 +87,12 @@ $extra = @(
     (Join-Path $vend 'eg_phy_glbl.v'),
     # 2026-10-02: bmp_scale now instantiates the TD BRAM primitive EG_LOGIC_BRAM
     # (the inferred array was 3072x64 = 196k flops; TD could not map it to BRAM).
-    (Join-Path $vend 'eg_logic_bram.v')
+    (Join-Path $vend 'eg_logic_bram.v'),
+    # 2026-10-25: font_cn now instantiates EG_PHY_BRAM32K (24x24 glyph ROM,
+    # INIT_FILE=font_cn.dat).  The TD model in sim_release is encrypted AND
+    # ignores INIT_FILE (verified 2026-10-25: reads all zeros), so use our own
+    # behavioural stand-in that does $readmemb from the .dat file.
+    (Join-Path $m0 'eg_phy_bram32k_behav.v')
 )
 
 # flat mirror: global_def.v is `include`d by path-less name
@@ -95,6 +100,9 @@ foreach ($f in ($files + $extra)) {
     if (Test-Path $f) { Copy-Item $f (Join-Path $scratch (Split-Path $f -Leaf)) -Force }
     else { Write-Host "MISSING: $f" -ForegroundColor Red; exit 1 }
 }
+# font_cn.v instantiates EG_PHY_BRAM32K with INIT_FILE="font_cn.dat" (relative
+# to the run dir), so the stand-in model needs it next to the compiled units.
+Copy-Item (Join-Path $here 'b_display\font_cn.dat') $scratch -Force
 
 Push-Location $scratch
 & "$ms\vlib.exe" work | Out-Null

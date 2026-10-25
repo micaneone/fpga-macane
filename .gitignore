@@ -40,3 +40,9 @@ prj/M2_Runs/
 
 # ---- tools\build.ps1 / burn.ps1 的运行日志（每次一个子目录 + 一个 .log）----
 logs/
+
+# ---- font ROM: 源数据 tools\font_cn_table.py; b_display\font_cn.dat 是给
+#      EG_PHY_BRAM32K 的 INIT_FILE(要跟 font_cn.v 同目录)，随仓库提交;
+#      sim\font_cn.dat 只是 run_cn.bat 从 b_display 拷过来的运行副本 ----
+sim/font_cn.dat
+tools/__pycache__/
