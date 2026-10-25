@@ -340,6 +340,22 @@
                     <Attr Name="CompileOrder" Val="85"/>
                 </FileInfo>
             </File>
+            <File Path="../lib/util/seg_decoder.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="86"/>
+                </FileInfo>
+            </File>
+            <File Path="../lib/util/seg_scan.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="87"/>
+                </FileInfo>
+            </File>
             <File Path="../lib/video/pic_bram.v">
                 <FileInfo>
                     <Attr Name="AutoExcluded" Val="true"/>
