@@ -6178,7 +6178,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
                 end
 
-                else if (aud_ran && BGM_LOOP && aud_loaded && !aud_fail) begin
+                else if (aud_ran && (BGM_LOOP || alert_on) && aud_loaded && !aud_fail) begin   // ★ 2026-10-25：报警音（SW4）必须一直循环，普通 BGM 按 BGM_LOOP
 
                     // ★ 留 40 ms 静音让"放完那一下的指数衰减"走完，再重起
 
