@@ -99,7 +99,13 @@ $runDir  = Join-Path $logs ('flash_' + $stamp)
 $logPath = Join-Path $logs ('flash_' + $stamp + '.log')
 New-Item -ItemType Directory -Force -Path $runDir | Out-Null
 
-$tclText = $tclTemplate.Replace('__BIT__', $bitF).Replace('__SPD__', [string]$Speed).Replace('__CAB__', [string]$Cable).Replace('__VERIFY__', $verifyBlock.TrimEnd())
+$tclText = $tclTemplate.Replace('__BIT__', $bitF).Replace('__VERIFY__', $verifyBlock.TrimEnd())
+$tclText = $tclText.Replace('__SPD__', [string]$Speed).Replace('__CAB__', [string]$Cable)
+# NOTE: __VERIFY__ must be expanded BEFORE __SPD__/__CAB__; $verifyBlock itself
+# contains those placeholders (a real bug hit on 2026-10-25: the verify line
+# shipped with literal __SPD__/__CAB__, TD ignored the bogus options and
+# verified anyway at its default speed/port -- rc=0 masked it).
+if ($tclText -match '__[A-Z]+__') { throw ('unresolved placeholder in generated tcl (fix flash.ps1): ' + ($Matches[0])) }
 $tclPath = Join-Path $runDir 'flash.tcl'
 [IO.File]::WriteAllText($tclPath, ($tclText + "`n"), (New-Object System.Text.UTF8Encoding($false)))
 
