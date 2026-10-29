@@ -2393,6 +2393,26 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
 
 
+    // ============================================================
+    //  [2026-10-30] menu top-right: original BMP resolution
+    //  bmp_analyze exports raw BMP header W/H (before decimation); A latches
+    //  the pair onto the slot it just wrote; display picks the front slot pair
+    //  (same front_sel polarity as desc_rx).
+    // ============================================================
+    wire [15:0] a_bmp_w, a_bmp_h;
+    reg  [11:0] ow_s0, oh_s0, ow_s1, oh_s1;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            ow_s0 <= 12'd0; oh_s0 <= 12'd0;
+            ow_s1 <= 12'd0; oh_s1 <= 12'd0;
+        end else if (a_desc_done) begin
+            if (a_slot_use == 3'd0) begin ow_s0 <= a_bmp_w[11:0]; oh_s0 <= a_bmp_h[11:0]; end
+            else                    begin ow_s1 <= a_bmp_w[11:0]; oh_s1 <= a_bmp_h[11:0]; end
+        end
+    end
+    wire [11:0] src_ow = fs2 ? ow_s1 : ow_s0;
+    wire [11:0] src_oh = fs2 ? oh_s1 : oh_s0;
+
     reg ml1, ml2, ac1, ac2;             // may_load / active → 控制域
 
     always @(posedge clk or negedge rst_n) begin
@@ -3419,6 +3439,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
         .o_img_total(img_total_w), .o_aud_total(aud_total_w), .o_sub_total(sub_total_w),
         // ★ 2026-10-25【数码管显示分辨率】源图尺寸直出（宽/高）
         .o_img_w(img_w_dbg), .o_img_h(img_h_dbg),
+        .o_bmp_w(a_bmp_w), .o_bmp_h(a_bmp_h),      // [2026-10-30] raw BMP size
 
     .sd_ready(a_sd_ready), .led_init(),
         .o_fe_done(a_fe_done),
@@ -4754,6 +4775,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
         .src_valid(src_valid), .src_base(src_base),
 
         .src_w(src_w), .src_h(src_h),
+        .src_orig_w(src_ow), .src_orig_h(src_oh),  // [2026-10-30] menu overlay
 
         // ★★ 2026-10-03（转场）：第二路 = 后台那个槽 + 转场三级
 

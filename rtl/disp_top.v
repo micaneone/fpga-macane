@@ -46,6 +46,10 @@ module disp_top #(
     input  wire [11:0] src_b_w,
     input  wire [11:0] src_b_h,
 
+    // ---- [2026-10-30] menu top-right original resolution ----
+    input  wire [11:0] src_orig_w,
+    input  wire [11:0] src_orig_h,
+
     // ---------------- ★ 第二路的缩放几何（来自 zoom_dual 的另一套）----------------
     input  wire [31:0]        step_b_q16,
     input  wire signed [31:0] off_ub_q16,
@@ -608,14 +612,41 @@ input  wire        menu_res_1024, // ★ 2026-10-25：菜单行 4「清晰」显
         .px_out   (px_al)
     );
 
+    // ============================================================
+    //  [2026-10-30] menu top-right original resolution overlay
+    //  placed AFTER alert and BEFORE menu: menu draws its dim frame over it,
+    //  so it is visible only while the menu is open; no BRAM used.
+    // ============================================================
+    wire [15:0] px_r;
+    wire        de_r, vs_r;
+    reg  [11:0] mx3, my3;
+    reg  [11:0] ow_d, oh_d;
+    always @(posedge clk_pix or negedge rst_pix_n) begin
+        if (!rst_pix_n) begin mx3 <= 12'd0; my3 <= 12'd0; ow_d <= 12'd0; oh_d <= 12'd0; end
+        else begin
+            mx3 <= mx2; my3 <= my2;
+            ow_d <= src_orig_w; oh_d <= src_orig_h;
+        end
+    end
+
+    res_ovl #(.SCR_W(800), .SCR_H(600)) u_res (
+        .clk_pix(clk_pix), .rst_pix_n(rst_pix_n),
+        .de_in(de_z), .vs_in(vs_z),
+        .x_in(mx2),  .y_in(my2),
+        .px_in(px_al),
+        .px_out(px_r), .de_out(de_r), .vs_out(vs_r),
+        .menu_on(menu_on),
+        .res_w(ow_d), .res_h(oh_d)
+    );
+
     wire [15:0] px_m;
     wire        de_m, vs_m;
 
     menu_ovl_cn u_menu (
         .clk_pix(clk_pix), .rst_pix_n(rst_pix_n),
-        .de_in(de_z), .vs_in(vs_z),
-        .x_in(mx2), .y_in(my2),
-        .px_in(px_al),
+        .de_in(de_r), .vs_in(vs_r),
+        .x_in(mx3), .y_in(my3),
+        .px_in(px_r),
         .px_out(px_m), .de_out(de_m), .vs_out(vs_m),
         .menu_on(menu_on), .menu_sel(menu_sel), .menu_edit(menu_edit),
         .menu_res_1024(menu_res_1024),   // ★ 2026-10-25：行 4「清晰」数值（800/1024）
