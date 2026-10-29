@@ -71,7 +71,10 @@
       output     [31:0] dbg_first_addr,  // 第一个像素的地址（期望 (H-1)*W）
       // ★★★ 2026-10-21【D3 · C3】位深单独引出：32 位 BMP 以前只会静默失败，
       //   兜底页要靠它写出 "NEED 24BIT BMP"，否则现场只会看到 "BAD IMAGE" 再猜。
-      output reg [15:0] bmp_bpp          // 位深（第 28~29 字节；24 = 唯一支持的格式）
+      output reg [15:0] bmp_bpp,          // 位深（第 28~29 字节；24 = 唯一支持的格式）
+      // [2026-10-30] menu top-right: raw BMP header width/height (BEFORE decimation)
+      output     [15:0] o_bmp_w,
+      output     [15:0] o_bmp_h
   );
 
       //======================================================================
@@ -614,4 +617,8 @@
           .eng_size    (eng_size),
           .eng_cluster (eng_cluster)
       );
+
+  // [2026-10-30] raw BMP size straight out to the menu resolution overlay
+  assign o_bmp_w = bmp_width[15:0];
+  assign o_bmp_h = bmp_height[15:0];
   endmodule
