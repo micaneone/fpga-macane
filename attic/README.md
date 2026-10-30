@@ -51,7 +51,18 @@ powershell -ExecutionPolicy Bypass -File .\tools\check_filelist.ps1
 | `viz_top.v` | 旧视觉顶层 |
 | `_wtest.txt` | 0 字节杂项文件 |
 
+## sim/
+
+| 文件 | 说明 |
+|---|---|
+| `menu_render.txt` | `tb_menu_font.v` 导出的菜单全屏 dot 渲染（197 KB），供 `dump_text.ps1` / `dump_val.ps1` / `pair_dump.ps1` 做报告配图 |
+| `menu_render_reference.txt` | 同一渲染的参考版（123 KB） |
+
+2026-10-29 从 `sim/` 移入（它们是**参考产物**，不是源码；仿真运行时会重新生成到 sim/ 下，
+`.gitignore` 已忽略 `sim/menu_cn*.ppm` 类中间产物）。
+
 ## prj/
 
-8 个 `M2.al.bak_*`：M2.al 的历史备份（重登记、去重、亮度、viz 等几次改动前
-的手工副本）。M2.al 本身的完整历史看 `git log -p prj/M2.al` 就有，备份不再需要。
+只保留 1 个 `M2.al.bak_20261017_before_A2`：A2 改动前的手工副本。
+其余 7 个历史备份（重登记、去重、亮度、viz 等）已于 2026-10-29 删除——
+M2.al 的完整历史在 `git log -p prj/M2.al` 里，手工副本不再需要。
