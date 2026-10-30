@@ -2,7 +2,7 @@
 # Usage: powershell -File pair_dump.ps1 -file <txt> -ra 0 -rb 1
 # ASCII-only on purpose (PS 5.1 reads BOM-less files as ANSI).
 param(
-    [string]$file = "E:\FPGA\ygcom\pre-release-testing\sim\menu_render.txt",
+    [string]$file = "E:\FPGA\ygcom\pre-release-testing\attic\sim\menu_render.txt",
     [int]$ra = 0,
     [int]$rb = 1
 )
