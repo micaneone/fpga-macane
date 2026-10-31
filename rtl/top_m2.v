@@ -3362,6 +3362,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     //   绝不越界写进后面的小槽区 / 字幕区。契约常量仍然只在上面 SFX_STRIDE 一处定义。
 
+    wire          a_fe_done;   // top_a.o_fe_done (fe progress pulse)
     top_a #(.SLOT_NUM(2), .AUDIO_MAX_WORDS(SFX_STRIDE), .BMP_NAME_EN(BMP_NAME_EN)) u_a (
 
         // ★★★ 2026-10-21【D3 · C1】这里从 `sys_rst_n` 改成 `a_rst_n`：
