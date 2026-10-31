@@ -22,8 +22,8 @@
 `timescale 1ns / 1ps
 
 module disp_top #(
-    // 桌面底色（RGB565）。米白 ≈ RGB888 240,240,224。
-    parameter [15:0] BG_COLOR = 16'hF79C,
+    // 桌面底色（RGB565）。纯黑：左侧行首错位露出的兜底色不再显白。
+    parameter [15:0] BG_COLOR = 16'h0000,
     // 行缓冲容量：适配缩小时一行要装下整行源图（最大 1575 像素）→ 2048
     parameter integer LINE_MAX = 2048
 )(
