@@ -190,7 +190,10 @@
             // ★ 2026-10-25【数码管显示分辨率】最近一次装进大槽的源图尺寸
             //   顶层数码管左边三位显示它（宽；宽≥1000 时显示高）
             output [15:0] o_img_w,
-            output [15:0] o_img_h
+            output [15:0] o_img_h,
+            // [2026-10-30] menu top-right: raw BMP W/H (before decimation)
+            output [15:0] o_bmp_w,
+            output [15:0] o_bmp_h
         );
 
             //======================================================================
@@ -206,6 +209,7 @@
             wire [15:0] px_data;
             wire        bmp_done, bmp_fail, bmp_busy;
             wire [15:0] img_width, img_height;
+            wire [15:0] bmp_w_orig, bmp_h_orig;   // raw BMP size (no decimation)
             wire        img_valid;
             // ★ bmp_scale 已去掉 —— 源图直接进槽，不缩放
 
@@ -412,6 +416,8 @@
             // ★ 2026-10-25：源图尺寸直出（给顶层数码管显示分辨率用）
             assign o_img_w     = img_width;
             assign o_img_h     = img_height;
+            assign o_bmp_w     = bmp_w_orig;
+            assign o_bmp_h     = bmp_h_orig;
 
             // ---- 谁在查（★ 全部用**组合的** sd_mode，和 start 的分配口径一致）----
             //   因为 start 就是组合分发的（`start & (sd_mode==N)`），同一拍必须能对上号。
@@ -712,7 +718,9 @@
                 .dbg_data_off   (),
                 .dbg_first_px   (dbg_first_px),
                 .dbg_first_addr (dbg_first_addr),
-                .bmp_bpp        (o_img_bpp)      // ★ D3 · C3：位深引出去给兜底页
+                .bmp_bpp        (o_img_bpp),      // ★ D3 · C3：位深引出去给兜底页
+                .o_bmp_w        (bmp_w_orig),
+                .o_bmp_h        (bmp_h_orig)
             );
 
             // ★★ bmp_scale 已删除 —— bmp_analyze 的像素流【直连】bmp2sdram

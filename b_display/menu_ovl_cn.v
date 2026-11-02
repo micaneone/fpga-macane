@@ -268,16 +268,38 @@ module menu_ovl_cn #(
     //    而那个"下一拍"正好是 q_ch/q_lx 所在的这一拍 ⇒ 第②级不用加流水，
     //    菜单总延迟仍 2 拍（下游 disp_top 不动）。数字仍是 7 段组合。
     // ============================================================
+    // 2026-10-31 timing: register the font-RAM address (was the 65 MHz worst path,
+    // -2.973ns / 13 logic levels) and push the whole overlay one stage deeper.
+    reg [4:0] g_ch_r, gy_r, lx_r;
+    always @(posedge clk_pix) begin
+        g_ch_r <= g_ch;
+        gy_r   <= gy;
+        lx_r   <= lx;
+    end
+
     wire font_px;
     font_cn u_font (
         .clk (clk_pix),
-        .ch  (g_ch),
-        .row (gy),
-        .col (lx),
+        .ch  (g_ch_r),
+        .row (gy_r),
+        .col (lx_r),
         .px  (font_px)
     );
 
-    wire draw_text = q_gly && font_px;
+    reg        q2_de, q2_vs, q2_fill, q2_sel, q2_frm, q2_gly;
+    reg [15:0] q2_px, q2_dim;
+    always @(posedge clk_pix) begin
+        q2_de   <= q_de;
+        q2_vs   <= q_vs;
+        q2_fill <= q_fill;
+        q2_sel  <= q_sel;
+        q2_frm  <= q_frm;
+        q2_gly  <= q_gly;
+        q2_px   <= q_px;
+        q2_dim  <= q_dim;
+    end
+
+    wire draw_text = q2_gly && font_px;
 
     always @(posedge clk_pix) begin
         if (!rst_pix_n) begin
@@ -285,13 +307,13 @@ module menu_ovl_cn #(
             de_out <= 1'b0;
             vs_out <= 1'b0;
         end else begin
-            de_out <= q_de;
-            vs_out <= q_vs;
+            de_out <= q2_de;
+            vs_out <= q2_vs;
             if (draw_text)      px_out <= CLR_INK;
-            else if (q_sel)     px_out <= menu_edit ? CLR_RED : CLR_SEL;   // 确认后（调节态）外框变红
-            else if (q_frm)     px_out <= CLR_FRAME;
-            else if (q_fill)    px_out <= q_dim;      // 半透明底（画面压暗 50%）
-            else                px_out <= q_px;
+            else if (q2_sel)    px_out <= menu_edit ? CLR_RED : CLR_SEL;   // 确认后（调节态）外框变红
+            else if (q2_frm)    px_out <= CLR_FRAME;
+            else if (q2_fill)   px_out <= q2_dim;     // 半透明底（画面压暗 50%）
+            else                px_out <= q2_px;
         end
     end
 

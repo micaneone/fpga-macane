@@ -278,25 +278,42 @@ module scaler_addr #(
     // ★ 同一处乘法分相位共用：
     //     pix_x==0 → yp_cur × 后台几何 = **后台本行的 v**（vq_m）
     //     pix_x==1 → yp_nxt × 前台几何 = 前台下一行的 v
-    wire signed [12:0] yp_m = ph_b ? yp_cur_s : yp_nxt_s;
+    // 2026-10-31 timing: pre-register y' (pix_y - win_y0 is stable within a row) so the
+    // multiplier inputs no longer sit at the end of the long v_cnt -> yp -> mult path.
+    reg signed [12:0] yp_nxt_r, yp_cur_r;
+    always @(posedge clk_pix or negedge rst_pix_n) begin
+        if (!rst_pix_n) begin
+            yp_nxt_r <= 13'sd0;
+            yp_cur_r <= 13'sd0;
+        end else begin
+            yp_nxt_r <= (({1'b0, pix_y}) + 13'sd1) - ({1'b0, win_y0});
+            yp_cur_r <= ({1'b0, pix_y}) - ({1'b0, win_y0});
+        end
+    end
+
+    wire signed [12:0] yp_m = ph_b ? yp_cur_r : yp_nxt_r;
     // ★ 这里必须【带符号扩展】（$signed(yp_m) 而不是 {19'd0, yp_m}）：
     //   B 的"本行 v"在窗口上方时 y' 是负的，必须算成真的负数（否则会变成
     //   一个"看起来合法"的大正数 → v_b_nxt 落在源图范围内 → 发一次不该发的
     //   行请求）。前台那条老写法（零扩展）之所以没事，是因为 y' 为负时它
     //   本来就不发请求，两种写法结果一样。
-    wire signed [31:0] vq_m = offv_m + $signed(yp_m) * $signed(step_m);
+    // 2026-10-31 timing (65 MHz): keep the phase mux out of the multiplier chain.
+    // Front and back each get their own multiply; same operands and same
+    // truncation as the old offv_m + yp_m*step_m form.
+    wire signed [31:0] vq_front = off_v_q16  + $signed(yp_nxt_r) * $signed(step_q16);
+    wire signed [31:0] vq_back  = off_vb_q16 + $signed(yp_cur_r) * $signed(step_b_q16);
     // ★ 后台"下一行"的 v = 本行 v + step（数学上完全等价，省掉一次乘法）
-    wire signed [31:0] vq_b_nxt = vq_m + step_m;
+    wire signed [31:0] vq_b_nxt = vq_back + step_b_q16;
     wire [15:0] v_b_nxt = vq_b_nxt[31:16];
 
     // ---- 第二路"本行"的 v：行内取寄存器，行首那一拍旁路用组合值 ----
     reg  [31:0] v_b_q;
-    wire [31:0] v_b_use = (pix_x == 12'd0) ? vq_m : v_b_q;
+    wire [31:0] v_b_use = (pix_x == 12'd0) ? vq_back : v_b_q;
     wire [15:0] v_int_b = v_b_use[31:16];
     wire        u_in_b  = (u_int_b < src_b_w16);
     wire        b_v_in  = (v_int_b < src_b_h16);
 
-    wire signed [31:0] v_q_nxt  = vq_m;          // 前台那一拍（pix_x==1）的值
+    wire signed [31:0] v_q_nxt  = vq_front;          // 前台那一拍（pix_x==1）的值
     wire [15:0] v_nxt = v_q_nxt[31:16];
 
     wire nxt_valid = win_on && src_valid
@@ -376,7 +393,7 @@ module scaler_addr #(
             //    这一拍上 vq_m / u_last_q 才是【后台】那套的值（分相位共用），
             //    同时把后台"本行"的 v 寄存下来（行内用它，行首那次旁路）。
             if (pix_de && (pix_x == 12'd0)) begin
-                v_b_q       <= vq_m;                    // 后台本行的 v（行内用）
+                v_b_q       <= vq_back;                    // 后台本行的 v（行内用）
                 b_s1_v      <= b_nxt_valid;
                 b_s1_bilin  <= bilin_en;
                 b_s1_vstore <= VFLIP ? (src_b_h - 12'd1 - v_b_nxt[11:0]) : v_b_nxt[11:0];

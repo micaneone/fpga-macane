@@ -1,0 +1,60 @@
+============================================================
+ 商场数字广告屏 + 应急插播系统（M2 视频显示工程）
+ 交付说明
+ 生成日期：2026-11-02
+============================================================
+
+一、工程概况
+- 目标竞赛：2026 FPGA 创新设计赛道（上海安路）选题一
+  "基于安路 EG4S20 的 HDMI 多媒体播放系统"（数字广告牌场景）
+- 器件 / 工具：安路 EG4S20BG256，TD 6.2.168116
+- 工程分支：exp/scale-rollback（HEAD aefe96f）
+- 显示输出：1024×768@60（本版），另附 800×600@60 版本（A 槽镜像）
+- 工程总览、架构、操作与验证记录详见根目录 README.md
+
+二、包结构（评委请先看根目录）
+- M2.al            安路 TD 工程文件（在包根目录，双击用 TD 打开即可）
+- README.md        工程总览文档（功能/架构/构建/烧录/仿真/操作/验证）
+- build.bat        一键构建（调 tools\build.ps1，需安路 TD）
+- burn.bat         一键 SRAM 烧录（调 tools\burn.ps1，需连板）
+- run_*.bat        10 个 ModelSim 仿真入口（run_c5.bat = 全部回归）
+- rtl/ a_image/ b_display/ lib/ prj/ sim/ tools/ viz2/   工程源码
+                   （prj/ 内含 IP al_ip/、时序约束 m2.sdc、引脚约束 m2_pin.adc）
+- 已剔除：构建日志、M2_Runs 产物、仿真编译目录、历史备份与旧文档
+
+三、工程文件与构建
+- M2.al 内部源文件列表已改写为相对包根的路径（a_image/ rtl/ lib/
+  b_display/ viz2/ prj/al_ip/ 等），整个包拷到任意目录均可直接打开。
+- 构建产物：M2_Runs\phy_1\M2.bit（生成于包根目录）
+- 一键构建：powershell -ExecutionPolicy Bypass -File .\tools\build.ps1
+  （脚本先删除 M2_Runs 再全量构建，并校验 bit 生成时间戳，防止假编译）
+
+四、时序验证（2026-10-31 构建，TD final timing summary）
+- Setup：WNS +110 ps，TNS 0，NUM_FEPS 0
+- Hold ：WNS +3 ps，TNS 0，NUM_FEPS 0
+- 该结果另经完整构建实测复核（M2.al 移到包根后重建，结果一致）
+- 资源占用：LUT 76.8%，REG 48.3%，BRAM 71.9%，DSP 89.7%，PLL 3/4
+
+五、板上镜像（SPI FLASH 双镜像 MULTI BOOT）
+- A 槽 @0x000000：800×600 版本（含 2026-11-01 数码管声明修复）
+- B 槽 @0x0A0000：1024×768 版本（本包工程）
+- 上电默认启动 A；拨动 SW3 后重新上电（下次换图）切换到 B
+- SRAM 下载（burn.bat）掉电即失，仅用于调试
+
+六、烧录方式
+- SRAM：tools\burn.ps1（根目录 burn.bat 封装），要求 PRG-2014 校验通过
+- SPI FLASH 单镜像固化：tools\flash.ps1
+- SPI FLASH 双镜像固化：tools\flash_mboot.ps1（A/B 合并，见脚本注释）
+
+七、文档索引
+- README.md                    工程总览文档（本包主文档）
+- 交付说明_1024.txt            本文件
+- tools/README.md              工具脚本用法与注意事项
+- tools/audio_expect.md        音频链路期望值
+- a_image/使用说明_top_a.md    A 轨详细说明
+- a_image/README_atrack_reverted.md  A 轨历史与回退记录
+- lib/README.md                通用 IP 说明
+
+八、说明
+- 本机无 WinRAR，源码包为 RAR4 存储(store)格式；WinRAR / 7-Zip /
+  Bandizip 均可正常打开解压（7-Zip 已验证：完整性 OK、解压后逐文件 SHA256 一致）。

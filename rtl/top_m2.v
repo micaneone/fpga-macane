@@ -2401,6 +2401,18 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
 
 
+    // [2026-10-30] menu top-right: original BMP header size (raw, before decimation)
+    wire [15:0] a_bmp_w, a_bmp_h;
+    reg  [11:0] ow_s0, oh_s0, ow_s1, oh_s1;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin ow_s0 <= 12'd0; oh_s0 <= 12'd0; ow_s1 <= 12'd0; oh_s1 <= 12'd0; end
+        else if (a_desc_done) begin
+            if (a_slot_use == 3'd0) begin ow_s0 <= a_bmp_w[11:0]; oh_s0 <= a_bmp_h[11:0]; end
+            else                    begin ow_s1 <= a_bmp_w[11:0]; oh_s1 <= a_bmp_h[11:0]; end
+        end
+    end
+    wire [11:0] src_ow = fs2 ? ow_s1 : ow_s0;
+    wire [11:0] src_oh = fs2 ? oh_s1 : oh_s0;
     reg ml1, ml2, ac1, ac2;             // may_load / active → 控制域
 
     always @(posedge clk or negedge rst_n) begin
@@ -3350,6 +3362,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
     //   绝不越界写进后面的小槽区 / 字幕区。契约常量仍然只在上面 SFX_STRIDE 一处定义。
 
+    wire          a_fe_done;   // top_a.o_fe_done (fe progress pulse)
     top_a #(.SLOT_NUM(2), .AUDIO_MAX_WORDS(SFX_STRIDE), .BMP_NAME_EN(BMP_NAME_EN)) u_a (
 
         // ★★★ 2026-10-21【D3 · C1】这里从 `sys_rst_n` 改成 `a_rst_n`：
@@ -3428,6 +3441,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
         // ★ 2026-10-25【数码管显示分辨率】源图尺寸直出（宽/高）
 
         .o_img_w(img_w_dbg), .o_img_h(img_h_dbg),
+        .o_bmp_w(a_bmp_w), .o_bmp_h(a_bmp_h),
     .sd_ready(a_sd_ready), .led_init(),
         .o_fe_done(a_fe_done),
 
@@ -4013,6 +4027,18 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
 
 
+    // 2026-10-31 timing: pipeline the writer-busy interlock into the read path.
+    // Old path u_arb/u_wr/write_cnt_reg -> wr_busy_w -> u_vrd/App_rd_en_r was the
+    // last 125 MHz violation (-0.021ns, 3 endpoints). Retiming with the 180-degree
+    // SDRAM clock delays the flag by half a cycle only (4 ns; the burst-level
+    // interlock is hundreds of ns wide) and crosses into the clkc[1] <-> clkc[2]
+    // phase group, which is already false-pathed in m2.sdc.
+    reg  wr_busy_180;
+    always @(posedge clk_sdr180 or negedge sys_rst_n) begin
+        if (!sys_rst_n) wr_busy_180 <= 1'b0;
+        else            wr_busy_180 <= wr_busy_w;
+    end
+
     vendor_rd_path u_vrd (
 
         .clk_mem          (clk_sdr),
@@ -4025,7 +4051,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
 
         .sdr_busy         (sdr_busy),
 
-        .wr_busy          (wr_busy_w),      // ★ 原厂互锁：写侧忙 ⇒ 读不发突发
+        .wr_busy          (wr_busy_180),      // ★ 原厂互锁：写侧忙 ⇒ 读不发突发
 
         // 读口（独占 SDRAM）
 
@@ -4761,6 +4787,7 @@ wire sys_rst_n = rst_n & pll_ok_reg & ~soft_rst;
         .src_valid(src_valid), .src_base(src_base),
 
         .src_w(src_w), .src_h(src_h),
+        .src_orig_w(src_ow), .src_orig_h(src_oh),
 
         // ★★ 2026-10-03（转场）：第二路 = 后台那个槽 + 转场三级
 

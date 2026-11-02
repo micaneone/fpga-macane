@@ -22,8 +22,8 @@
 `timescale 1ns / 1ps
 
 module disp_top #(
-    // 桌面底色（RGB565）。米白 ≈ RGB888 240,240,224。
-    parameter [15:0] BG_COLOR = 16'hF79C,
+    // 桌面底色（RGB565）。纯黑：左侧行首错位露出的兜底色不再显白。
+    parameter [15:0] BG_COLOR = 16'h0000,
     // 行缓冲容量：适配缩小时一行要装下整行源图（最大 1575 像素）→ 2048
     parameter integer LINE_MAX = 2048
 )(
@@ -45,6 +45,10 @@ module disp_top #(
     input  wire [20:0] src_b_base,
     input  wire [11:0] src_b_w,
     input  wire [11:0] src_b_h,
+
+    // [2026-10-30] menu top-right original resolution
+    input  wire [11:0] src_orig_w,
+    input  wire [11:0] src_orig_h,
 
     // ---------------- ★ 第二路的缩放几何（来自 zoom_dual 的另一套）----------------
     input  wire [31:0]        step_b_q16,
@@ -242,6 +246,16 @@ input  wire        menu_res_1024, // ★ 2026-10-25：菜单行 4「清晰」显
     wire        vs, de;
     wire [11:0] pix_x, pix_y;
 
+    // 2026-10-31 timing: register pix_x into the compositor (65 MHz scaler worst
+    // paths: h_cnt -> multiplier inputs, -2.9ns). pix_y is NOT delayed (line-buffer
+    // parity depends on pix_y[0]); delaying pix_x only shifts the picture by 1 column.
+    reg [11:0] pix_x_q;
+    always @(posedge clk_pix or negedge rst_pix_n) begin
+        if (!rst_pix_n) pix_x_q <= 12'd0;
+        else            pix_x_q <= pix_x;
+    end
+
+
     video_timing #(.pic_wide(1024), .pic_high(768)) u_timing (   // exp/res1024
         .clk(clk_pix), .rst_n(rst_pix_n),
         .hs(), .vs(vs), .de(de), .x(pix_x), .y(pix_y)
@@ -269,7 +283,7 @@ input  wire        menu_res_1024, // ★ 2026-10-25：菜单行 4「清晰」显
 
     win_compositor #(.LINE_MAX(LINE_MAX), .MAX_OUT(16)) u_comp (
         .clk_pix(clk_pix), .rst_pix_n(rst_pix_n),
-        .vs(vs), .pix_x(pix_x), .pix_y(pix_y), .pix_de(de),
+        .vs(vs), .pix_x(pix_x_q), .pix_y(pix_y), .pix_de(de),
         .src_valid(src_valid), .src_base(src_base),
         .src_w(src_w), .src_h(src_h),
         // ★★ 2026-10-03（转场 ②b）：第二路正式接上（后台那一张）
@@ -485,16 +499,31 @@ input  wire        menu_res_1024, // ★ 2026-10-25：菜单行 4「清晰」显
     //     所以 `failsafe_pg` 里纯组合画、不打拍，格子边界才和屏幕对齐。
     //   ★ `fs_on=0` 时 `px_bg` 逐位等于 `px_mix` ⇒ 正常出图与改之前一模一样。
     wire [15:0] px_bg;
+    // 2026-10-31 timing: register failsafe state (65 MHz domain, -2.899ns path into subtitle)
+    reg        fs_on_d;
+    reg [1:0]  fs_state_d;
+    always @(posedge clk_pix or negedge rst_pix_n) begin
+        if (!rst_pix_n) begin fs_on_d <= 1'b0; fs_state_d <= 2'd0; end
+        else            begin fs_on_d <= fs_on; fs_state_d <= fs_state; end
+    end
+
+    // 2026-10-31 timing: register failsafe pixel coords (1 px shift, invisible)
+    reg [11:0] fs_x_d, fs_y_d;
+    always @(posedge clk_pix or negedge rst_pix_n) begin
+        if (!rst_pix_n) begin fs_x_d <= 12'd0; fs_y_d <= 12'd0; end
+        else            begin fs_x_d <= o_dbg_x; fs_y_d <= o_dbg_y; end
+    end
+
     failsafe_pg #(
         .SCALE(2)
     ) u_failsafe (
         .clk_pix  (clk_pix),
         .rst_pix_n(rst_pix_n),
         .de_in    (de_mix),
-        .x_in     (o_dbg_x),
-        .y_in     (o_dbg_y),
-        .fs_on    (fs_on),
-        .fs_state (fs_state),
+        .x_in     (fs_x_d),
+        .y_in     (fs_y_d),
+        .fs_on    (fs_on_d),
+        .fs_state (fs_state_d),
         .fs_hint  (fs_hint),
         .px_in    (px_mix),
         .px_out   (px_bg)
@@ -608,25 +637,59 @@ input  wire        menu_res_1024, // ★ 2026-10-25：菜单行 4「清晰」显
         .px_out   (px_al)
     );
 
+    // [2026-10-30] menu top-right original resolution overlay (1024x768 image)
+    wire [15:0] px_r;
+    wire        de_r, vs_r;
+    reg  [11:0] mx3, my3;
+    reg  [11:0] mx4, my4;
+    reg  [11:0] ow_d, oh_d;
+    always @(posedge clk_pix or negedge rst_pix_n) begin
+        if (!rst_pix_n) begin mx3 <= 12'd0; my3 <= 12'd0; ow_d <= 12'd0; oh_d <= 12'd0; mx4 <= 12'd0; my4 <= 12'd0; end
+        else begin mx3 <= mx2; my3 <= my2; ow_d <= src_orig_w; oh_d <= src_orig_h; mx4 <= mx3; my4 <= my3; end
+    end
+    res_ovl #(.SCR_W(1024), .SCR_H(768)) u_res (
+        .clk_pix(clk_pix), .rst_pix_n(rst_pix_n),
+        .de_in(de_z), .vs_in(vs_z), .x_in(mx2), .y_in(my2), .px_in(px_al),
+        .px_out(px_r), .de_out(de_r), .vs_out(vs_r),
+        .menu_on(menu_on), .res_w(ow_d), .res_h(oh_d)
+    );
+
+    // 2026-10-31 timing: register menu slow inputs (65 MHz domain, -3.464ns path)
+    reg        mn_on_d;  reg [2:0] mn_sel_d;  reg mn_edit_d;
+    reg        mn_r1024_d, mn_subon_d;  reg [2:0] mn_zoom_d;
+    reg        mn_selaud_d, mn_vizon_d;  reg [3:0] mn_vol_d, mn_bri_d;
+    always @(posedge clk_pix or negedge rst_pix_n) begin
+        if (!rst_pix_n) begin
+            mn_on_d <= 1'b0;  mn_sel_d <= 3'd0;  mn_edit_d <= 1'b0;
+            mn_r1024_d <= 1'b0;  mn_subon_d <= 1'b0;  mn_zoom_d <= 3'd0;
+            mn_selaud_d <= 1'b0;  mn_vizon_d <= 1'b1;  mn_vol_d <= 4'd0;  mn_bri_d <= 4'd0;
+        end else begin
+            mn_on_d <= menu_on;  mn_sel_d <= menu_sel;  mn_edit_d <= menu_edit;
+            mn_r1024_d <= menu_res_1024;  mn_subon_d <= menu_sub_on;  mn_zoom_d <= menu_zoom_lv;
+            mn_selaud_d <= menu_sel_aud;  mn_vizon_d <= menu_viz_on;
+            mn_vol_d <= menu_vol;  mn_bri_d <= menu_bri;
+        end
+    end
+
     wire [15:0] px_m;
     wire        de_m, vs_m;
 
     menu_ovl_cn u_menu (
         .clk_pix(clk_pix), .rst_pix_n(rst_pix_n),
-        .de_in(de_z), .vs_in(vs_z),
-        .x_in(mx2), .y_in(my2),
-        .px_in(px_al),
+        .de_in(de_r), .vs_in(vs_r),
+        .x_in(mx4), .y_in(my4),
+        .px_in(px_r),
         .px_out(px_m), .de_out(de_m), .vs_out(vs_m),
-        .menu_on(menu_on), .menu_sel(menu_sel), .menu_edit(menu_edit),
-        .menu_res_1024(menu_res_1024),   // ★ 2026-10-25：行 4「清晰」数值（800/1024）
-        .menu_sub_on(menu_sub_on),       // ★ 2026-10-25：行 5「字幕」数值（开/关）
+        .menu_on(mn_on_d), .menu_sel(mn_sel_d), .menu_edit(mn_edit_d),
+        .menu_res_1024(mn_r1024_d),   // ★ 2026-10-25：行 4「清晰」数值（800/1024）
+        .menu_sub_on(mn_subon_d),       // ★ 2026-10-25：行 5「字幕」数值（开/关）
         // ★★★ 2026-10-15【参数菜单·第2步】把两个活值送进菜单层去查字模（纯接线、只读）
-        .zoom_lv(menu_zoom_lv), .sel_aud(menu_sel_aud),
+        .zoom_lv(mn_zoom_d), .sel_aud(mn_selaud_d),
         // ★★★ 2026-10-24【行 1 换成可视化开关】：面板显示 ON/OFF 用（真实开关在 top_m2 的 viz_on）
-        .viz_on(menu_viz_on),
+        .viz_on(mn_vizon_d),
         // ★★★ 2026-10-17【音量/亮度进菜单】行 2 的音量、行 3 的亮度
-        .vol_lv(menu_vol),
-        .bri_lv(menu_bri)
+        .vol_lv(mn_vol_d),
+        .bri_lv(mn_bri_d)
         // ★★★ 2026-10-20【D1 · A2 删 VISUAL 行】：`.viz_on` 端口已从 menu_ovl 删除
     );
 

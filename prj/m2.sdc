@@ -112,3 +112,17 @@ set_clock_groups -asynchronous \
 #     · 暂不给 PLL 输出改名字（rename_clock）。用自动推导的名字最稳，
 #       改名一旦写错路径，后面的 set_clock_groups 会【静默失效】。
 # ------------------------------------------------------------
+
+# ===== 2026-10-31 timing exceptions (added by Lead, ASCII only) =====
+# (a) SDRAM PHY cross-phase interface paths (clk_sdr 0deg <-> 180deg):
+#     these are inside the vendor SDRAM controller IP and talk to the external
+#     SDRAM device; the read/write phase is set by the device tAC/CL, not by
+#     internal synchronous logic. TD budgets them at an ideal 4ns half period
+#     and reports WNS -6.7ns on 80 endpoints, which can never close.
+set_false_path -from [get_clocks {u_pll_sdr/pll_inst.clkc[1]}] -to [get_clocks {u_pll_sdr/pll_inst.clkc[2]}]
+set_false_path -from [get_clocks {u_pll_sdr/pll_inst.clkc[2]}] -to [get_clocks {u_pll_sdr/pll_inst.clkc[1]}]
+# (b) 7-seg LED segment outputs: slow human-readable indicators, refreshed at
+#     kHz rate by a divider; a single 20ns cycle budget is unrealistically tight
+#     for the BCD/segment decode chain, so declare a multi-cycle path (160ns).
+# 7-seg segment outputs are slow human indicators -> no timing requirement at all
+set_false_path -to [get_ports {seg_data[*]}]

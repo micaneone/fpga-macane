@@ -211,6 +211,15 @@ module sdr_arb #(
     wire        occ_hi_raw  = |occ[21:9];
     wire        occ_pre_raw = (|occ[21:8]) | (&occ[7:3]);
     wire [9:0]  fifo_rdusedw_eng = occ_hi_raw ? 10'd511 : occ[9:0];
+
+    // 2026-10-31 timing: register the occupancy estimate once before it enters
+    // u_vrd (frame_fifo rdusedw). The old path occ[21:9] -> mux -> rdusedw ->
+    // frame_fifo_read burst decision was the 125 MHz group's worst path.
+    reg  [9:0]  fifo_rdusedw_eng_q;
+    always @(posedge clk_mem or negedge rst_mem_n) begin
+        if (!rst_mem_n) fifo_rdusedw_eng_q <= 10'd0;
+        else            fifo_rdusedw_eng_q <= fifo_rdusedw_eng;
+    end
     // ★ 诊断（见端口说明）：occ ≥ 512 = 引擎认为管道满、会开工。
     //   放在这里是因为 occ 在这一行上面才声明（ModelSim 不许先用后声明）。
     assign o_occ_hi = occ_hi_raw;
@@ -383,7 +392,7 @@ module sdr_arb #(
         //   引擎才会一直搬到"最后一段真数据"写完为止
         .write_len        (wr_len_m),
         .fifo_aclr        (fifo_aclr),
-        .rdusedw          (fifo_rdusedw_eng)
+        .rdusedw          (fifo_rdusedw_eng_q)
     );
 
     // ---- ack：mem 域的一拍脉冲 → 翻 toggle → 控制域检边沿

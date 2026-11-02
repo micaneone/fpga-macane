@@ -157,8 +157,16 @@ module aud_blk_rd #(
 
     wire        a_play_pulse = ap2 ^ ap3;   // toggle 变化 = 一条新命令
     wire [AFIFO_AW:0] argray_bin = gray2bin(argray_sync);
+
+    // 2026-10-31 timing: register the de-grayed read pointer before the
+    // occupancy subtract / compare (worst 125 MHz path, -0.174ns, 8 endpoints).
+    reg  [AFIFO_AW:0] argray_bin_r;
+    always @(posedge clk_mem or negedge rst_mem_n) begin
+        if (!rst_mem_n) argray_bin_r <= {(AFIFO_AW+1){1'b0}};
+        else            argray_bin_r <= argray_bin;
+    end
     wire [AFIFO_AW:0] wrp_bin    = gray2bin(wgray_s2);
-    wire [AFIFO_AW:0] afifo_used_m = awp - argray_bin;    // 显存域口径（偏保守）
+    wire [AFIFO_AW:0] afifo_used_m = awp - argray_bin_r;    // 显存域口径（偏保守）
     wire [AFIFO_AW:0] afifo_cnt    = wrp_bin - arp;       // 音频域口径
 
     // 下一块要多少字：够 BLK_WORDS 就给整块，最后一块少给点

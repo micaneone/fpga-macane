@@ -161,12 +161,27 @@ module transition (
     endfunction
 
     // ★ 2026-10-17：系数改成逐像素（软边）。PASS 仍直通 A 端（一个乘法器都不走）。
-    wire [15:0] fade_out = mix565(mix_from, mix_to, k_pix);
+    // 2026-10-31 timing: register the mixer inputs (65 MHz pixel domain).
+    // One extra pixel of latency only shifts the wipe edge by 1 px (invisible).
+    reg [15:0] mf_r, mt_r;
+    reg [8:0]  k_r;
+    reg        de_r, vs_r;
+    always @(posedge clk_pix or negedge rst_pix_n) begin
+        if (!rst_pix_n) begin
+            mf_r <= 16'd0; mt_r <= 16'd0; k_r <= 9'd0;
+            de_r <= 1'b0;  vs_r <= 1'b0;
+        end else begin
+            mf_r <= mix_from; mt_r <= mix_to; k_r <= k_pix;
+            de_r <= de_in;    vs_r <= vs_in;
+        end
+    end
+
+    wire [15:0] fade_out = mix565(mf_r, mt_r, k_r);
 
     // ============================================================
     //  ④ 选一个 + 寄存一拍
     // ============================================================
-    wire [15:0] mix = (mode == M_PASS) ? mix_from : fade_out;
+    wire [15:0] mix = (mode == M_PASS) ? mf_r : fade_out;
 
     always @(posedge clk_pix or negedge rst_pix_n) begin
         if (!rst_pix_n) begin
@@ -176,8 +191,8 @@ module transition (
         end
         else begin
             rgb565 <= mix;
-            de_out <= de_in;
-            vs_out <= vs_in;
+            de_out <= de_r;
+            vs_out <= vs_r;
         end
     end
 
